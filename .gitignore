@@ -1,0 +1,16 @@
+# Compiled Output
+*.dmg
+*.app/
+*.dll
+*.exe
+test_rumble
+
+# Log files
+*.log
+
+# System files
+.DS_Store
+
+# Verification screenshots
+screenshot_verification*.png
+controller.png
