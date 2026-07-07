@@ -13,7 +13,8 @@ Typically, macOS Wine translation layers strip out controller vibration and adva
 ## 📸 App Preview
 
 <p align="center">
-  <img src="screenshot.jpg" width="650" alt="DS4Link UI Preview">
+  <img src="preview_bridge.png" width="45%" alt="DS4Link Bridge Monitor Preview">&nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="preview_setup.png" width="45%" alt="DS4Link CrossOver Setup Preview">
 </p>
 
 ---
