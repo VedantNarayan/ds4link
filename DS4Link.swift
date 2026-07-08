@@ -233,6 +233,12 @@ class HapticBridge: NSObject {
     private var rightPlayer: CHHapticPatternPlayer?
     private var currentController: GCController?
     
+    private var targetLeft: Float = 0.0
+    private var targetRight: Float = 0.0
+    private var isUpdatePending = false
+    private let stateLock = NSLock()
+    private var watchdogWorkItem: DispatchWorkItem?
+    
     var onControllerStatusChanged: ((String) -> Void)?
     
     override init() {
@@ -310,6 +316,47 @@ class HapticBridge: NSObject {
         rightPlayer = nil
         currentController = nil
         onControllerStatusChanged?("Disconnected")
+    }
+    
+    func updateRumbleTarget(left: Float, right: Float) {
+        stateLock.lock()
+        targetLeft = left
+        targetRight = right
+        
+        // Cancel existing watchdog
+        watchdogWorkItem?.cancel()
+        
+        if left > 0.0 || right > 0.0 {
+            // Schedule watchdog to turn off vibration if no updates are received for 1 second
+            let newWatchdog = DispatchWorkItem { [weak self] in
+                writeLog("[App] Watchdog triggered: No updates received for 1.0s. Resetting rumble to 0.")
+                self?.updateRumbleTarget(left: 0.0, right: 0.0)
+            }
+            watchdogWorkItem = newWatchdog
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: newWatchdog)
+        } else {
+            watchdogWorkItem = nil
+        }
+        
+        if !isUpdatePending {
+            isUpdatePending = true
+            stateLock.unlock()
+            DispatchQueue.main.async { [weak self] in
+                self?.applyPendingRumble()
+            }
+        } else {
+            stateLock.unlock()
+        }
+    }
+    
+    private func applyPendingRumble() {
+        stateLock.lock()
+        let left = targetLeft
+        let right = targetRight
+        isUpdatePending = false
+        stateLock.unlock()
+        
+        self.setRumble(left: left, right: right)
     }
     
     func setRumble(left: Float, right: Float) {
@@ -424,10 +471,7 @@ class BSDUDPServer {
                 if buffer[0] == 0x01 && bytesRead >= 3 {
                     let left = Float(buffer[1]) / 255.0
                     let right = Float(buffer[2]) / 255.0
-                    writeLog("Received rumble command: left=\(left), right=\(right)")
-                    DispatchQueue.main.async {
-                        HapticBridge.shared.setRumble(left: left, right: right)
-                    }
+                    HapticBridge.shared.updateRumbleTarget(left: left, right: right)
                 } else {
                     let data = Data(buffer[0..<Int(bytesRead)])
                     if let msg = String(data: data, encoding: .utf8) {

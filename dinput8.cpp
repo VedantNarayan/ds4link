@@ -253,7 +253,7 @@ BOOL WINAPI DetourWriteFile(HANDLE hFile, LPCVOID lpBuffer, DWORD nNumberOfBytes
     LeaveCriticalSection(&handles_lock);
     
     if (is_controller) {
-        WriteLog("[DLL] DetourWriteFile called for controller handle %p, size=%lu\n", hFile, nNumberOfBytesToWrite);
+        // WriteLog("[DLL] DetourWriteFile called for controller handle %p, size=%lu\n", hFile, nNumberOfBytesToWrite);
         if (nNumberOfBytesToWrite > 0 && lpBuffer) {
             BYTE* buf = (BYTE*)lpBuffer;
             BYTE left_motor = 0;
@@ -271,7 +271,7 @@ BOOL WINAPI DetourWriteFile(HANDLE hFile, LPCVOID lpBuffer, DWORD nNumberOfBytes
             }
             
             if (has_rumble) {
-                WriteLog("[DLL] DetourWriteFile: Sending rumble left=%d, right=%d\n", left_motor, right_motor);
+                // WriteLog("[DLL] DetourWriteFile: Sending rumble left=%d, right=%d\n", left_motor, right_motor);
                 unsigned char packet[3];
                 packet[0] = 0x01;
                 packet[1] = left_motor;
@@ -324,7 +324,7 @@ BOOLEAN __stdcall DetourHidD_SetOutputReport(HANDLE HidDeviceObject, PVOID Repor
         }
         
         if (has_rumble) {
-            WriteLog("[DLL] DetourHidD_SetOutputReport: Sending rumble left=%d, right=%d\n", left_motor, right_motor);
+            // WriteLog("[DLL] DetourHidD_SetOutputReport: Sending rumble left=%d, right=%d\n", left_motor, right_motor);
             unsigned char packet[3];
             packet[0] = 0x01;
             packet[1] = left_motor;
@@ -376,7 +376,7 @@ BOOLEAN __stdcall DetourHidD_SetFeature(HANDLE HidDeviceObject, PVOID ReportBuff
         }
         
         if (has_rumble) {
-            WriteLog("[DLL] DetourHidD_SetFeature: Sending rumble left=%d, right=%d\n", left_motor, right_motor);
+            // WriteLog("[DLL] DetourHidD_SetFeature: Sending rumble left=%d, right=%d\n", left_motor, right_motor);
             unsigned char packet[3];
             packet[0] = 0x01;
             packet[1] = left_motor;
@@ -407,7 +407,7 @@ DWORD WINAPI DetourXInputSetState(DWORD dwUserIndex, PXINPUT_VIBRATION pVibratio
     if (pVibration) {
         BYTE left_motor = pVibration->wLeftMotorSpeed / 256;
         BYTE right_motor = pVibration->wRightMotorSpeed / 256;
-        WriteLog("[DLL] DetourXInputSetState: Sending rumble left=%d, right=%d\n", left_motor, right_motor);
+        // WriteLog("[DLL] DetourXInputSetState: Sending rumble left=%d, right=%d\n", left_motor, right_motor);
         
         unsigned char packet[3];
         packet[0] = 0x01;
@@ -491,7 +491,7 @@ BOOL WINAPI DetourDeviceIoControl(HANDLE hDevice, DWORD dwIoControlCode, LPVOID 
     
     if (is_controller) {
         if (dwIoControlCode == 0xb0191 || dwIoControlCode == 0xb0195 || dwIoControlCode == 0xb0199) {
-            WriteLog("[DLL] DetourDeviceIoControl: Intercepted HID write IOCTL 0x%X, size=%lu\n", dwIoControlCode, nInBufferSize);
+            // WriteLog("[DLL] DetourDeviceIoControl: Intercepted HID write IOCTL 0x%X, size=%lu\n", dwIoControlCode, nInBufferSize);
             if (lpInBuffer && nInBufferSize > 0) {
                 BYTE* buf = (BYTE*)lpInBuffer;
                 BYTE left_motor = 0;
@@ -509,7 +509,7 @@ BOOL WINAPI DetourDeviceIoControl(HANDLE hDevice, DWORD dwIoControlCode, LPVOID 
                 }
                 
                 if (has_rumble) {
-                    WriteLog("[DLL] DetourDeviceIoControl: Sending rumble left=%d, right=%d\n", left_motor, right_motor);
+                    // WriteLog("[DLL] DetourDeviceIoControl: Sending rumble left=%d, right=%d\n", left_motor, right_motor);
                     unsigned char packet[3];
                     packet[0] = 0x01;
                     packet[1] = left_motor;
@@ -623,7 +623,7 @@ void __cdecl Hooked_TriggerVibration(void* self, uint64_t inputHandle, unsigned 
     EnsureOrigInitialized();
     BYTE left_motor = usLeftSpeed / 256;
     BYTE right_motor = usRightSpeed / 256;
-    WriteLog("[DLL] Hooked_TriggerVibration: Sending rumble left=%d, right=%d\n", left_motor, right_motor);
+    // WriteLog("[DLL] Hooked_TriggerVibration: Sending rumble left=%d, right=%d\n", left_motor, right_motor);
     
     unsigned char packet[3];
     packet[0] = 0x01;
@@ -640,7 +640,7 @@ void __cdecl Hooked_TriggerVibrationExtended(void* self, uint64_t inputHandle, u
     EnsureOrigInitialized();
     BYTE left_motor = usLeftSpeed / 256;
     BYTE right_motor = usRightSpeed / 256;
-    WriteLog("[DLL] Hooked_TriggerVibrationExtended: Sending rumble left=%d, right=%d\n", left_motor, right_motor);
+    // WriteLog("[DLL] Hooked_TriggerVibrationExtended: Sending rumble left=%d, right=%d\n", left_motor, right_motor);
     
     unsigned char packet[3];
     packet[0] = 0x01;
@@ -657,7 +657,7 @@ void __cdecl Hooked_ControllerTriggerVibration(void* self, uint64_t controllerHa
     EnsureOrigInitialized();
     BYTE left_motor = usLeftSpeed / 256;
     BYTE right_motor = usRightSpeed / 256;
-    WriteLog("[DLL] Hooked_ControllerTriggerVibration: Sending rumble left=%d, right=%d\n", left_motor, right_motor);
+    // WriteLog("[DLL] Hooked_ControllerTriggerVibration: Sending rumble left=%d, right=%d\n", left_motor, right_motor);
     
     unsigned char packet[3];
     packet[0] = 0x01;
