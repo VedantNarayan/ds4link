@@ -23,7 +23,8 @@ for line in sys_lines:
         new_sys_lines.append(line)
         continue
     elif strip_line.startswith("[") and in_winebus_section:
-        new_sys_lines.append('"Enable SDL"=dword:00000000')
+        new_sys_lines.append('"Enable IOHID"=dword:00000001')
+        new_sys_lines.append('"Enable GCHelper"=dword:00000000')
         in_winebus_section = False
         new_sys_lines.append(line)
         continue
@@ -31,9 +32,10 @@ for line in sys_lines:
     if in_winebus_section:
         if strip_line.startswith('"DisableHidraw"='):
             new_sys_lines.append('"DisableHidraw"=dword:00000000')
+        elif strip_line.startswith('"Enable SDL"='):
+            new_sys_lines.append('"Enable SDL"=dword:00000000')
         elif (strip_line.startswith('"DisableInput"=') or 
               strip_line.startswith('"DisableInputServices"=') or 
-              strip_line.startswith('"Enable SDL"=') or 
               strip_line.startswith('"Enable IOHID"=') or 
               strip_line.startswith('"Enable GCHelper"=')):
             continue
@@ -44,7 +46,7 @@ for line in sys_lines:
 
 with open(sys_reg_path, "w", encoding="utf-8") as f:
     f.write("\n".join(new_sys_lines) + "\n")
-print("system.reg: Restored default CrossOver controller backend settings (Enable SDL=0).")
+print("system.reg: Configured macOS raw IOHID backend and disabled SDL translation.")
 
 
 # 2. Configure user.reg (DLL overrides)
@@ -105,24 +107,24 @@ if os.path.exists(localconfig_path):
     with open(localconfig_path, "r", encoding="utf-8", errors="ignore") as f:
         lc_content = f.read()
     
-    # Add app 2109700 with rumble disabled if not present
-    if '"2109700"' not in lc_content:
+    # Add app 2420110 (Horizon Forbidden West) with rumble disabled if not present
+    if '"2420110"' not in lc_content:
         # Insert before the closing brace of the "apps" block
         lc_content = lc_content.replace(
             '\t}\n\t"controller_config"',
-            '\t\t"2109700"\n\t\t{\n\t\t\t"UseSteamControllerConfig"\t\t"2"\n\t\t\t"SteamControllerRumble"\t\t"0"\n\t\t\t"SteamControllerRumbleIntensity"\t\t"0"\n\t\t}\n\t}\n\t"controller_config"'
+            '\t\t"2420110"\n\t\t{\n\t\t\t"UseSteamControllerConfig"\t\t"2"\n\t\t\t"SteamControllerRumble"\t\t"0"\n\t\t\t"SteamControllerRumbleIntensity"\t\t"0"\n\t\t}\n\t}\n\t"controller_config"'
         )
     else:
         # If app exists, set rumble to 0
         import re
-        # Match the 2109700 block and replace rumble settings
+        # Match the 2420110 block and replace rumble settings
         lc_content = re.sub(
-            r'("2109700"\s*\{[^}]*"SteamControllerRumble"\s*")([^"]*)',
+            r'("2420110"\s*\{[^}]*"SteamControllerRumble"\s*")([^"]*)',
             r'\g<1>0',
             lc_content
         )
         lc_content = re.sub(
-            r'("2109700"\s*\{[^}]*"SteamControllerRumbleIntensity"\s*")([^"]*)',
+            r'("2420110"\s*\{[^}]*"SteamControllerRumbleIntensity"\s*")([^"]*)',
             r'\g<1>0',
             lc_content
         )
