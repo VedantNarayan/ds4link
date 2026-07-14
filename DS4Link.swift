@@ -120,6 +120,7 @@ func patchRegistry(bottleName: String) -> Bool {
         var newUserLines: [String] = []
         var inOverrides = false
         var dinput8Added = false
+        var dxgiAdded = false
         
         for line in userLines {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
@@ -127,7 +128,9 @@ func patchRegistry(bottleName: String) -> Bool {
                 inOverrides = true
                 newUserLines.append(line)
                 newUserLines.append("\"dinput8\"=\"native,builtin\"")
+                newUserLines.append("\"dxgi\"=\"native,builtin\"")
                 dinput8Added = true
+                dxgiAdded = true
                 continue
             } else if trimmed.starts(with: "[") && inOverrides {
                 inOverrides = false
@@ -136,7 +139,7 @@ func patchRegistry(bottleName: String) -> Bool {
             }
             
             if inOverrides {
-                if trimmed.starts(with: "\"dinput8\"=") {
+                if trimmed.starts(with: "\"dinput8\"=") || trimmed.starts(with: "\"dxgi\"=") {
                     continue
                 } else {
                     newUserLines.append(line)
@@ -146,10 +149,15 @@ func patchRegistry(bottleName: String) -> Bool {
             }
         }
         
-        if !dinput8Added {
+        if !dinput8Added || !dxgiAdded {
             newUserLines.append("")
             newUserLines.append("[Software\\\\Wine\\\\DllOverrides]")
-            newUserLines.append("\"dinput8\"=\"native,builtin\"")
+            if !dinput8Added {
+                newUserLines.append("\"dinput8\"=\"native,builtin\"")
+            }
+            if !dxgiAdded {
+                newUserLines.append("\"dxgi\"=\"native,builtin\"")
+            }
         }
         try newUserLines.joined(separator: "\n").write(to: userReg, atomically: true, encoding: .utf8)
         
@@ -187,39 +195,75 @@ func deployGameDLL(bottleName: String, gameName: String) -> Bool {
     let gameDir = getSteamCommonPath(bottleName: bottleName).appendingPathComponent(gameName)
     guard FileManager.default.fileExists(atPath: gameDir.path) else { return false }
     
-    let dest = gameDir.appendingPathComponent("dinput8.dll")
-    guard let src = Bundle.main.path(forResource: "dinput8_64", ofType: "dll") else {
-        writeLog("[App] Error: dinput8_64.dll not found in app bundle.")
+    // Clean up any old dxgi/dinput8 DLLs
+    let oldDxgi = gameDir.appendingPathComponent("dxgi.dll")
+    let oldDxgiOrig = gameDir.appendingPathComponent("dxgi_original.dll")
+    let oldDinput8 = gameDir.appendingPathComponent("dinput8.dll")
+    try? FileManager.default.removeItem(at: oldDxgi)
+    try? FileManager.default.removeItem(at: oldDxgiOrig)
+    try? FileManager.default.removeItem(at: oldDinput8)
+    
+    let originalDest = gameDir.appendingPathComponent("steam_api64_original.dll")
+    let dest = gameDir.appendingPathComponent("steam_api64.dll")
+    
+    guard let src = Bundle.main.path(forResource: "steam_api64", ofType: "dll") else {
+        writeLog("[App] Error: steam_api64.dll not found in app bundle.")
         return false
     }
     
     do {
+        // Backup the original steam_api64.dll from the game folder
+        if FileManager.default.fileExists(atPath: dest.path) && !FileManager.default.fileExists(atPath: originalDest.path) {
+            try FileManager.default.copyItem(atPath: dest.path, toPath: originalDest.path)
+            writeLog("[App] Created backup steam_api64_original.dll")
+        }
+        
+        // Copy our proxy
         if FileManager.default.fileExists(atPath: dest.path) {
             try FileManager.default.removeItem(at: dest)
         }
         try FileManager.default.copyItem(atPath: src, toPath: dest.path)
+        writeLog("[App] Deployed steam_api64.dll proxy successfully.")
         return true
     } catch {
-        writeLog("[App] Failed to copy dinput8_64.dll to \(gameName): \(error)")
+        writeLog("[App] Failed to deploy steam_api64.dll proxy: \(error)")
         return false
     }
 }
 
 func deployManualDLL(targetFolder: URL) -> Bool {
-    let dest = targetFolder.appendingPathComponent("dinput8.dll")
-    guard let src = Bundle.main.path(forResource: "dinput8_64", ofType: "dll") else {
-        writeLog("[App] Error: dinput8_64.dll not found in app bundle.")
+    let dest = targetFolder.appendingPathComponent("steam_api64.dll")
+    let originalDest = targetFolder.appendingPathComponent("steam_api64_original.dll")
+    
+    // Clean up old dxgi/dinput8 DLLs
+    let oldDxgi = targetFolder.appendingPathComponent("dxgi.dll")
+    let oldDxgiOrig = targetFolder.appendingPathComponent("dxgi_original.dll")
+    let oldDinput8 = targetFolder.appendingPathComponent("dinput8.dll")
+    try? FileManager.default.removeItem(at: oldDxgi)
+    try? FileManager.default.removeItem(at: oldDxgiOrig)
+    try? FileManager.default.removeItem(at: oldDinput8)
+    
+    guard let src = Bundle.main.path(forResource: "steam_api64", ofType: "dll") else {
+        writeLog("[App] Error: steam_api64.dll not found in app bundle.")
         return false
     }
     
     do {
+        // Backup original steam_api64.dll
+        if FileManager.default.fileExists(atPath: dest.path) && !FileManager.default.fileExists(atPath: originalDest.path) {
+            try FileManager.default.copyItem(atPath: dest.path, toPath: originalDest.path)
+            writeLog("[App] Created backup steam_api64_original.dll")
+        }
+        
+        // Copy proxy
         if FileManager.default.fileExists(atPath: dest.path) {
             try FileManager.default.removeItem(at: dest)
         }
         try FileManager.default.copyItem(atPath: src, toPath: dest.path)
+        writeLog("[App] Deployed manual steam_api64.dll proxy successfully.")
         return true
     } catch {
-        writeLog("[App] Failed to copy manual dinput8_64.dll: \(error)")
+        writeLog("[App] Failed to copy manual steam_api64.dll: \(error)")
         return false
     }
 }
@@ -235,9 +279,17 @@ class HapticBridge: NSObject {
     
     private var targetLeft: Float = 0.0
     private var targetRight: Float = 0.0
-    private var isUpdatePending = false
     private let stateLock = NSLock()
-    private var watchdogWorkItem: DispatchWorkItem?
+    
+    /// User-adjustable rumble intensity (0.0 to 1.0). Stored in UserDefaults.
+    var rumbleIntensity: Float {
+        get { UserDefaults.standard.float(forKey: "rumbleIntensity") }
+        set { UserDefaults.standard.set(newValue, forKey: "rumbleIntensity") }
+    }
+    
+    static func registerDefaults() {
+        UserDefaults.standard.register(defaults: ["rumbleIntensity": Float(0.25)])
+    }
     
     var onControllerStatusChanged: ((String) -> Void)?
     
@@ -322,53 +374,88 @@ class HapticBridge: NSObject {
         stateLock.lock()
         targetLeft = left
         targetRight = right
-        
-        // Cancel existing watchdog
-        watchdogWorkItem?.cancel()
-        
-        if left > 0.0 || right > 0.0 {
-            // Schedule watchdog to turn off vibration if no updates are received for 1 second
-            let newWatchdog = DispatchWorkItem { [weak self] in
-                writeLog("[App] Watchdog triggered: No updates received for 1.0s. Resetting rumble to 0.")
-                self?.updateRumbleTarget(left: 0.0, right: 0.0)
-            }
-            watchdogWorkItem = newWatchdog
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: newWatchdog)
-        } else {
-            watchdogWorkItem = nil
-        }
-        
-        if !isUpdatePending {
-            isUpdatePending = true
-            stateLock.unlock()
-            DispatchQueue.main.async { [weak self] in
-                self?.applyPendingRumble()
-            }
-        } else {
-            stateLock.unlock()
-        }
-    }
-    
-    private func applyPendingRumble() {
-        stateLock.lock()
-        let left = targetLeft
-        let right = targetRight
-        isUpdatePending = false
+        lastUpdateTime = CACurrentMediaTime()
         stateLock.unlock()
         
-        self.setRumble(left: left, right: right)
+        // Direct haptic update — no main queue dispatch for minimum latency
+        setRumble(left: left, right: right)
+        
+        // Ensure watchdog timer is running
+        startWatchdogIfNeeded()
     }
+    
+    private var lastUpdateTime: CFTimeInterval = 0
+    private var watchdogTimer: DispatchSourceTimer?
+    
+    private func startWatchdogIfNeeded() {
+        guard watchdogTimer == nil else { return }
+        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+        timer.schedule(deadline: .now() + 0.5, repeating: 0.5)
+        timer.setEventHandler { [weak self] in
+            guard let self = self else { return }
+            self.stateLock.lock()
+            let elapsed = CACurrentMediaTime() - self.lastUpdateTime
+            let left = self.targetLeft
+            let right = self.targetRight
+            self.stateLock.unlock()
+            
+            if elapsed > 1.0 && (left > 0.0 || right > 0.0) {
+                writeLog("[App] Watchdog: No updates for 1s. Stopping rumble.")
+                self.setRumble(left: 0, right: 0)
+                self.stateLock.lock()
+                self.targetLeft = 0
+                self.targetRight = 0
+                self.stateLock.unlock()
+            }
+        }
+        timer.resume()
+        watchdogTimer = timer
+    }
+
     
     func setRumble(left: Float, right: Float) {
         guard currentController != nil else { return }
         
+        // Dead zone: ignore low rumble values (ambient noise floor)
+        let deadZone: Float = 0.3
+        let l = left < deadZone ? 0.0 : left
+        let r = right < deadZone ? 0.0 : right
+        
         do {
-            // Fallback path
+            // Stop and destroy players when target rumble is zero to ensure motors turn off
+            if l == 0.0 && r == 0.0 {
+                if leftPlayer != nil {
+                    try? leftPlayer?.stop(atTime: 0)
+                    leftPlayer = nil
+                }
+                if rightPlayer != nil {
+                    try? rightPlayer?.stop(atTime: 0)
+                    rightPlayer = nil
+                }
+                return
+            }
+            
+            // Apply non-linear curve: square root for more dynamic range
+            // Then scale by user's rumble intensity preference
+            let userScale = rumbleIntensity
+            if userScale < 0.01 {
+                // Rumble disabled by user
+                if leftPlayer != nil { try? leftPlayer?.stop(atTime: 0); leftPlayer = nil }
+                if rightPlayer != nil { try? rightPlayer?.stop(atTime: 0); rightPlayer = nil }
+                return
+            }
+            let lScaled = sqrt(l) * userScale
+            let rScaled = sqrt(r) * userScale
+            
+            // Low sharpness = smooth, bassy rumble (like a real controller motor)
+            let sharpnessValue: Float = 0.3
+            
+            // Fallback path (single engine for both sides)
             if leftEngine == rightEngine, let engine = leftEngine {
-                let val = max(left, right)
+                let val = max(lScaled, rScaled)
                 if leftPlayer == nil {
                     let intensity = CHHapticEventParameter(parameterID: .hapticIntensity, value: 1.0)
-                    let sharpness = CHHapticEventParameter(parameterID: .hapticSharpness, value: 1.0)
+                    let sharpness = CHHapticEventParameter(parameterID: .hapticSharpness, value: sharpnessValue)
                     let event = CHHapticEvent(eventType: .hapticContinuous, parameters: [intensity, sharpness], relativeTime: 0, duration: 3600.0)
                     let pattern = try CHHapticPattern(events: [event], parameters: [])
                     leftPlayer = try engine.makePlayer(with: pattern)
@@ -383,26 +470,26 @@ class HapticBridge: NSObject {
             if let engine = leftEngine {
                 if leftPlayer == nil {
                     let intensity = CHHapticEventParameter(parameterID: .hapticIntensity, value: 1.0)
-                    let sharpness = CHHapticEventParameter(parameterID: .hapticSharpness, value: 1.0)
+                    let sharpness = CHHapticEventParameter(parameterID: .hapticSharpness, value: sharpnessValue)
                     let event = CHHapticEvent(eventType: .hapticContinuous, parameters: [intensity, sharpness], relativeTime: 0, duration: 3600.0)
                     let pattern = try CHHapticPattern(events: [event], parameters: [])
                     leftPlayer = try engine.makePlayer(with: pattern)
                     try leftPlayer?.start(atTime: 0)
                 }
-                let param = CHHapticDynamicParameter(parameterID: .hapticIntensityControl, value: left, relativeTime: 0)
+                let param = CHHapticDynamicParameter(parameterID: .hapticIntensityControl, value: lScaled, relativeTime: 0)
                 try leftPlayer?.sendParameters([param], atTime: 0)
             }
             
             if let engine = rightEngine {
                 if rightPlayer == nil {
                     let intensity = CHHapticEventParameter(parameterID: .hapticIntensity, value: 1.0)
-                    let sharpness = CHHapticEventParameter(parameterID: .hapticSharpness, value: 1.0)
+                    let sharpness = CHHapticEventParameter(parameterID: .hapticSharpness, value: sharpnessValue)
                     let event = CHHapticEvent(eventType: .hapticContinuous, parameters: [intensity, sharpness], relativeTime: 0, duration: 3600.0)
                     let pattern = try CHHapticPattern(events: [event], parameters: [])
                     rightPlayer = try engine.makePlayer(with: pattern)
                     try rightPlayer?.start(atTime: 0)
                 }
-                let param = CHHapticDynamicParameter(parameterID: .hapticIntensityControl, value: right, relativeTime: 0)
+                let param = CHHapticDynamicParameter(parameterID: .hapticIntensityControl, value: rScaled, relativeTime: 0)
                 try rightPlayer?.sendParameters([param], atTime: 0)
             }
         } catch {
@@ -493,12 +580,15 @@ class BSDUDPServer {
 
 // Beautiful tabbed main view controller
 class MainViewController: NSViewController {
+    static var shared: MainViewController? = nil
     var tabView: NSTabView!
     var segmentedControl: NSSegmentedControl!
     
     // Tab 1: Bridge Monitor
     var statusLabel: NSTextField!
     var testButton: NSButton!
+    var intensitySlider: NSSlider!
+    var intensityLabel: NSTextField!
     var logScrollView: NSScrollView!
     var logTextView: NSTextView!
     var clearButton: NSButton!
@@ -513,6 +603,7 @@ class MainViewController: NSViewController {
     var manualDeployBtn: NSButton!
     
     override func loadView() {
+        MainViewController.shared = self
         let view = NSView(frame: NSRect(x: 0, y: 0, width: 500, height: 500))
         self.view = view
         view.wantsLayer = true
@@ -573,6 +664,24 @@ class MainViewController: NSViewController {
         testButton.translatesAutoresizingMaskIntoConstraints = false
         parent.addSubview(testButton)
         
+        // Rumble Intensity Slider
+        let sliderLabel = NSTextField(labelWithString: "Rumble Intensity:")
+        sliderLabel.font = NSFont.systemFont(ofSize: 12, weight: .medium)
+        sliderLabel.textColor = NSColor(white: 0.85, alpha: 1.0)
+        sliderLabel.translatesAutoresizingMaskIntoConstraints = false
+        parent.addSubview(sliderLabel)
+        
+        intensitySlider = NSSlider(value: Double(HapticBridge.shared.rumbleIntensity * 100), minValue: 0, maxValue: 100, target: self, action: #selector(intensitySliderChanged(_:)))
+        intensitySlider.translatesAutoresizingMaskIntoConstraints = false
+        parent.addSubview(intensitySlider)
+        
+        intensityLabel = NSTextField(labelWithString: "\(Int(HapticBridge.shared.rumbleIntensity * 100))%")
+        intensityLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .bold)
+        intensityLabel.textColor = NSColor(red: 0.3, green: 0.9, blue: 0.4, alpha: 1.0)
+        intensityLabel.alignment = .right
+        intensityLabel.translatesAutoresizingMaskIntoConstraints = false
+        parent.addSubview(intensityLabel)
+        
         logScrollView = NSScrollView()
         logScrollView.hasVerticalScroller = true
         logScrollView.translatesAutoresizingMaskIntoConstraints = false
@@ -616,7 +725,18 @@ class MainViewController: NSViewController {
             testButton.widthAnchor.constraint(equalToConstant: 180),
             testButton.heightAnchor.constraint(equalToConstant: 26),
             
-            logScrollView.topAnchor.constraint(equalTo: testButton.bottomAnchor, constant: 15),
+            sliderLabel.topAnchor.constraint(equalTo: testButton.bottomAnchor, constant: 12),
+            sliderLabel.leadingAnchor.constraint(equalTo: parent.leadingAnchor, constant: 15),
+            
+            intensitySlider.centerYAnchor.constraint(equalTo: sliderLabel.centerYAnchor),
+            intensitySlider.leadingAnchor.constraint(equalTo: sliderLabel.trailingAnchor, constant: 8),
+            intensitySlider.trailingAnchor.constraint(equalTo: intensityLabel.leadingAnchor, constant: -8),
+            
+            intensityLabel.centerYAnchor.constraint(equalTo: sliderLabel.centerYAnchor),
+            intensityLabel.trailingAnchor.constraint(equalTo: parent.trailingAnchor, constant: -15),
+            intensityLabel.widthAnchor.constraint(equalToConstant: 45),
+            
+            logScrollView.topAnchor.constraint(equalTo: sliderLabel.bottomAnchor, constant: 12),
             logScrollView.leadingAnchor.constraint(equalTo: parent.leadingAnchor, constant: 15),
             logScrollView.trailingAnchor.constraint(equalTo: parent.trailingAnchor, constant: -15),
             logScrollView.bottomAnchor.constraint(equalTo: clearButton.topAnchor, constant: -15),
@@ -774,7 +894,7 @@ class MainViewController: NSViewController {
             label.setContentHuggingPriority(.defaultLow, for: .horizontal)
             row.addView(label, in: .leading)
             
-            let dest = getSteamCommonPath(bottleName: selectedBottle).appendingPathComponent(game).appendingPathComponent("dinput8.dll")
+            let dest = getSteamCommonPath(bottleName: selectedBottle).appendingPathComponent(game).appendingPathComponent("dxgi.dll")
             let isInstalled = FileManager.default.fileExists(atPath: dest.path)
             
             let statusLabel = NSTextField(labelWithString: isInstalled ? "Active" : "Not Active")
@@ -843,8 +963,8 @@ class MainViewController: NSViewController {
         guard let gameName = sender.identifier?.rawValue else { return }
         
         if deployGameDLL(bottleName: selectedBottle, gameName: gameName) {
-            writeLog("[App] Successfully deployed 64-bit dinput8.dll to game: \(gameName)")
-            showDialog(message: "DLL deployed successfully!", info: "Deployed proxy dinput8.dll to game: \(gameName)")
+            writeLog("[App] Successfully deployed 64-bit dxgi.dll to game: \(gameName)")
+            showDialog(message: "DLL deployed successfully!", info: "Deployed proxy dxgi.dll to game: \(gameName)")
             refreshGamesList()
         } else {
             writeLog("[App] Failed to deploy DLL to game: \(gameName)")
@@ -862,8 +982,8 @@ class MainViewController: NSViewController {
         openPanel.begin { [weak self] response in
             if response == .OK, let url = openPanel.url {
                 if deployManualDLL(targetFolder: url) {
-                    writeLog("[App] Manually deployed 64-bit dinput8.dll to: \(url.path)")
-                    self?.showDialog(message: "Manual DLL deployed successfully!", info: "Copied proxy dinput8.dll to: \(url.lastPathComponent)")
+                    writeLog("[App] Manually deployed 64-bit dxgi.dll to: \(url.path)")
+                    self?.showDialog(message: "Manual DLL deployed successfully!", info: "Copied proxy dxgi.dll to: \(url.lastPathComponent)")
                     self?.refreshGamesList()
                 } else {
                     writeLog("[App] Failed to manually deploy DLL to: \(url.path)")
@@ -894,6 +1014,17 @@ class MainViewController: NSViewController {
     
     @objc func testRumbleClicked() {
         HapticBridge.shared.testRumble()
+    }
+    
+    @objc func intensitySliderChanged(_ sender: NSSlider) {
+        let pct = Float(sender.doubleValue) / 100.0
+        HapticBridge.shared.rumbleIntensity = pct
+        intensityLabel.stringValue = "\(Int(sender.doubleValue))%"
+        
+        // If slider set to 0, immediately stop any active rumble
+        if pct < 0.01 {
+            HapticBridge.shared.updateRumbleTarget(left: 0, right: 0)
+        }
     }
     
     @objc func clearLogsClicked() {
@@ -931,6 +1062,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     func applicationDidFinishLaunching(_ notification: Notification) {
+        HapticBridge.registerDefaults()
         NSApp.setActivationPolicy(.regular)
         
         let rect = NSRect(x: 0, y: 0, width: 500, height: 530)

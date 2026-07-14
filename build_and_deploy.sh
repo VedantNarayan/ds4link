@@ -3,14 +3,14 @@ set -e
 
 WORKSPACE_DIR="/Users/Vedant/Documents/ds4_rumble_bridge"
 BOTTLE_STEAM_DIR="/Volumes/Mac_EXT/CrossOverData/CrossOver/Bottles/Steam/drive_c/Program Files (x86)/Steam"
-GAME_DIR="$BOTTLE_STEAM_DIR/steamapps/common/Marvel's Spider-Man Miles Morales"
+GAME_DIR="$BOTTLE_STEAM_DIR/steamapps/common/Horizon Forbidden West Complete Edition"
 
 echo "=== 1. Cross-compiling Windows Proxy DLLs ==="
-# Compile 64-bit DLL
-x86_64-w64-mingw32-g++ -shared -static -static-libgcc -static-libstdc++ -o "$WORKSPACE_DIR/dinput8_64.dll" "$WORKSPACE_DIR/dinput8.cpp" "$WORKSPACE_DIR/dinput8.def" -lws2_32
-echo "Success: Compiled 64-bit dinput8_64.dll"
+# Compile 64-bit SteamAPI DLL for games
+x86_64-w64-mingw32-g++ -shared -static -static-libgcc -static-libstdc++ -o "$WORKSPACE_DIR/steam_api64.dll" "$WORKSPACE_DIR/steam_api.cpp" "$WORKSPACE_DIR/steam_api.def" -lws2_32
+echo "Success: Compiled 64-bit steam_api64.dll"
 
-# Compile 32-bit DLL
+# Compile 32-bit DirectInput DLL for Steam client
 i686-w64-mingw32-g++ -shared -static -static-libgcc -static-libstdc++ -o "$WORKSPACE_DIR/dinput8_32.dll" "$WORKSPACE_DIR/dinput8.cpp" "$WORKSPACE_DIR/dinput8.def" -lws2_32
 echo "Success: Compiled 32-bit dinput8_32.dll"
 
@@ -32,9 +32,9 @@ cat << 'EOF' > "$WORKSPACE_DIR/DS4Link.app/Contents/Info.plist"
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0.1</string>
+    <string>1.1.0</string>
     <key>CFBundleVersion</key>
-    <string>2</string>
+    <string>3</string>
     <key>LSMinimumSystemVersion</key>
     <string>11.0</string>
     <key>LSUIElement</key>
@@ -49,7 +49,7 @@ EOF
 
 # Copy DLLs to app Resources
 cp "$WORKSPACE_DIR/dinput8_32.dll" "$WORKSPACE_DIR/DS4Link.app/Contents/Resources/"
-cp "$WORKSPACE_DIR/dinput8_64.dll" "$WORKSPACE_DIR/DS4Link.app/Contents/Resources/"
+cp "$WORKSPACE_DIR/steam_api64.dll" "$WORKSPACE_DIR/DS4Link.app/Contents/Resources/"
 
 # Copy AppIcon.icns to app Resources
 if [ -f "$WORKSPACE_DIR/AppIcon.icns" ]; then
@@ -69,8 +69,15 @@ python3 "$WORKSPACE_DIR/configure_bottle.py"
 
 # Deploy DLLs (local)
 if [ -d "$GAME_DIR" ]; then
-    cp "$WORKSPACE_DIR/dinput8_64.dll" "$GAME_DIR/dinput8.dll"
-    echo "Success: Deployed 64-bit dinput8.dll to game folder"
+    rm -f "$GAME_DIR/dxgi.dll"
+    rm -f "$GAME_DIR/dxgi_original.dll"
+    
+    if [ -f "$GAME_DIR/steam_api64.dll" ] && [ ! -f "$GAME_DIR/steam_api64_original.dll" ]; then
+        cp "$GAME_DIR/steam_api64.dll" "$GAME_DIR/steam_api64_original.dll"
+        echo "Success: Created backup steam_api64_original.dll"
+    fi
+    cp "$WORKSPACE_DIR/steam_api64.dll" "$GAME_DIR/steam_api64.dll"
+    echo "Success: Deployed 64-bit steam_api64.dll to game folder"
 fi
 if [ -d "$BOTTLE_STEAM_DIR" ]; then
     cp "$WORKSPACE_DIR/dinput8_32.dll" "$BOTTLE_STEAM_DIR/dinput8.dll"
