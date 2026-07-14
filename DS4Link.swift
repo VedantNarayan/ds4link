@@ -422,30 +422,11 @@ class HapticBridge: NSObject {
         let r = right < deadZone ? 0.0 : right
         
         do {
-            // Stop and destroy players when target rumble is zero to ensure motors turn off
-            if l == 0.0 && r == 0.0 {
-                if leftPlayer != nil {
-                    try? leftPlayer?.stop(atTime: 0)
-                    leftPlayer = nil
-                }
-                if rightPlayer != nil {
-                    try? rightPlayer?.stop(atTime: 0)
-                    rightPlayer = nil
-                }
-                return
-            }
-            
             // Apply non-linear curve: square root for more dynamic range
             // Then scale by user's rumble intensity preference
             let userScale = rumbleIntensity
-            if userScale < 0.01 {
-                // Rumble disabled by user
-                if leftPlayer != nil { try? leftPlayer?.stop(atTime: 0); leftPlayer = nil }
-                if rightPlayer != nil { try? rightPlayer?.stop(atTime: 0); rightPlayer = nil }
-                return
-            }
-            let lScaled = sqrt(l) * userScale
-            let rScaled = sqrt(r) * userScale
+            let lScaled = userScale < 0.01 ? 0.0 : (sqrt(l) * userScale)
+            let rScaled = userScale < 0.01 ? 0.0 : (sqrt(r) * userScale)
             
             // Low sharpness = smooth, bassy rumble (like a real controller motor)
             let sharpnessValue: Float = 0.3

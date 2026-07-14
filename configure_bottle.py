@@ -23,9 +23,7 @@ for line in sys_lines:
         new_sys_lines.append(line)
         continue
     elif strip_line.startswith("[") and in_winebus_section:
-        new_sys_lines.append('"Enable SDL"=dword:00000001')
-        new_sys_lines.append('"Enable IOHID"=dword:00000000')
-        new_sys_lines.append('"Enable GCHelper"=dword:00000000')
+        new_sys_lines.append('"Enable SDL"=dword:00000000')
         in_winebus_section = False
         new_sys_lines.append(line)
         continue
@@ -46,7 +44,7 @@ for line in sys_lines:
 
 with open(sys_reg_path, "w", encoding="utf-8") as f:
     f.write("\n".join(new_sys_lines) + "\n")
-print("system.reg: Configured macOS SDL backend (with Gyro support) and disabled IOHID/GCHelper.")
+print("system.reg: Restored default CrossOver controller backend settings (Enable SDL=0).")
 
 
 # 2. Configure user.reg (DLL overrides)
