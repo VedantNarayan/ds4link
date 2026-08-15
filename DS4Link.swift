@@ -53,7 +53,6 @@ class EngineProfileManager {
         var profile: EngineProfile
         var cleanTitle = exeName.replacingOccurrences(of: ".exe", with: "").replacingOccurrences(of: ".EXE", with: "")
         
-        // Clean game title formatting
         if cleanTitle.lowercased().contains("wewerehere") {
             cleanTitle = "We Were Here Together"
         }
@@ -335,7 +334,7 @@ class GameWatcher {
     }
 }
 
-// MARK: - High-Rate Gyroscope Engine with Bluetooth Bandwidth Optimizer
+// MARK: - High-Rate Gyroscope Engine
 class GyroEngine {
     static let shared = GyroEngine()
     private var gyroSocket: Int32 = -1
@@ -710,7 +709,7 @@ class BSDUDPServer {
     }
 }
 
-// MARK: - Pixel-Perfect Native macOS Popover Control Center (AutoLayout)
+// MARK: - Compact Native macOS Popover Control Center (280px Width)
 class PopoverViewController: NSViewController {
     static var shared: PopoverViewController?
     
@@ -731,7 +730,7 @@ class PopoverViewController: NSViewController {
     
     override func loadView() {
         PopoverViewController.shared = self
-        let root = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 460))
+        let root = NSView(frame: NSRect(x: 0, y: 0, width: 280, height: 430))
         self.view = root
         root.wantsLayer = true
         
@@ -739,15 +738,15 @@ class PopoverViewController: NSViewController {
         mainStack.orientation = .vertical
         mainStack.alignment = .leading
         mainStack.distribution = .fill
-        mainStack.spacing = 10
+        mainStack.spacing = 8
         mainStack.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(mainStack)
         
         NSLayoutConstraint.activate([
-            mainStack.topAnchor.constraint(equalTo: root.topAnchor, constant: 14),
-            mainStack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 14),
-            mainStack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -14),
-            mainStack.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -14)
+            mainStack.topAnchor.constraint(equalTo: root.topAnchor, constant: 10),
+            mainStack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 10),
+            mainStack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -10),
+            mainStack.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -10)
         ])
         
         // 1. Header Card (Device & Game DNA)
@@ -758,7 +757,7 @@ class PopoverViewController: NSViewController {
         let headerContent = NSStackView()
         headerContent.orientation = .horizontal
         headerContent.alignment = .centerY
-        headerContent.spacing = 12
+        headerContent.spacing = 10
         headerContent.translatesAutoresizingMaskIntoConstraints = false
         headerCard.addSubview(headerContent)
         
@@ -766,14 +765,14 @@ class PopoverViewController: NSViewController {
         iconView.image = NSImage(systemSymbolName: "gamecontroller.fill", accessibilityDescription: nil)
         iconView.contentTintColor = NSColor(red: 0.35, green: 0.85, blue: 1.0, alpha: 1.0)
         iconView.translatesAutoresizingMaskIntoConstraints = false
-        iconView.widthAnchor.constraint(equalToConstant: 32).isActive = true
-        iconView.heightAnchor.constraint(equalToConstant: 32).isActive = true
+        iconView.widthAnchor.constraint(equalToConstant: 28).isActive = true
+        iconView.heightAnchor.constraint(equalToConstant: 28).isActive = true
         headerContent.addArrangedSubview(iconView)
         
         let textStack = NSStackView()
         textStack.orientation = .vertical
         textStack.alignment = .leading
-        textStack.spacing = 2
+        textStack.spacing = 1.5
         textStack.translatesAutoresizingMaskIntoConstraints = false
         headerContent.addArrangedSubview(textStack)
         
@@ -786,47 +785,46 @@ class PopoverViewController: NSViewController {
         topRow.widthAnchor.constraint(equalTo: textStack.widthAnchor).isActive = true
         
         controllerNameLabel = NSTextField(labelWithString: "DUALSHOCK 4")
-        controllerNameLabel.font = NSFont.systemFont(ofSize: 13, weight: .bold)
+        controllerNameLabel.font = NSFont.systemFont(ofSize: 12, weight: .bold)
         controllerNameLabel.textColor = .labelColor
         topRow.addArrangedSubview(controllerNameLabel)
         
         let spacer = NSView()
-        spacer.translatesAutoresizingMaskIntoConstraints = false
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
         topRow.addArrangedSubview(spacer)
         
         batteryBadge = NSTextField(labelWithString: " 25% ")
-        batteryBadge.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .bold)
+        batteryBadge.font = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .bold)
         batteryBadge.alignment = .center
         batteryBadge.textColor = NSColor(red: 0.25, green: 0.85, blue: 0.45, alpha: 1.0)
         batteryBadge.backgroundColor = NSColor(red: 0.25, green: 0.85, blue: 0.45, alpha: 0.15)
         batteryBadge.drawsBackground = true
         batteryBadge.wantsLayer = true
-        batteryBadge.layer?.cornerRadius = 5
+        batteryBadge.layer?.cornerRadius = 4
         batteryBadge.layer?.masksToBounds = true
         topRow.addArrangedSubview(batteryBadge)
         
         connectionSubLabel = NSTextField(labelWithString: "Bluetooth • Universal Auto-Hook")
-        connectionSubLabel.font = NSFont.systemFont(ofSize: 10, weight: .medium)
+        connectionSubLabel.font = NSFont.systemFont(ofSize: 9.5, weight: .medium)
         connectionSubLabel.textColor = .secondaryLabelColor
         textStack.addArrangedSubview(connectionSubLabel)
         
         engineBadge = NSTextField(labelWithString: "⚡ Universal Game Engine")
-        engineBadge.font = NSFont.systemFont(ofSize: 9.5, weight: .semibold)
+        engineBadge.font = NSFont.systemFont(ofSize: 9.0, weight: .semibold)
         engineBadge.textColor = NSColor(red: 0.4, green: 0.8, blue: 1.0, alpha: 1.0)
         engineBadge.lineBreakMode = .byTruncatingTail
         textStack.addArrangedSubview(engineBadge)
         
         audioStatusLabel = NSTextField(labelWithString: "🔊 Speaker: Requires USB Cable")
-        audioStatusLabel.font = NSFont.systemFont(ofSize: 9.0, weight: .regular)
+        audioStatusLabel.font = NSFont.systemFont(ofSize: 8.5, weight: .regular)
         audioStatusLabel.textColor = .tertiaryLabelColor
         textStack.addArrangedSubview(audioStatusLabel)
         
         NSLayoutConstraint.activate([
-            headerContent.topAnchor.constraint(equalTo: headerCard.topAnchor, constant: 10),
-            headerContent.leadingAnchor.constraint(equalTo: headerCard.leadingAnchor, constant: 12),
-            headerContent.trailingAnchor.constraint(equalTo: headerCard.trailingAnchor, constant: -12),
-            headerContent.bottomAnchor.constraint(equalTo: headerCard.bottomAnchor, constant: -10)
+            headerContent.topAnchor.constraint(equalTo: headerCard.topAnchor, constant: 8),
+            headerContent.leadingAnchor.constraint(equalTo: headerCard.leadingAnchor, constant: 10),
+            headerContent.trailingAnchor.constraint(equalTo: headerCard.trailingAnchor, constant: -10),
+            headerContent.bottomAnchor.constraint(equalTo: headerCard.bottomAnchor, constant: -8)
         ])
         
         // 2. Haptics Card
@@ -837,7 +835,7 @@ class PopoverViewController: NSViewController {
         let hapStack = NSStackView()
         hapStack.orientation = .vertical
         hapStack.alignment = .leading
-        hapStack.spacing = 8
+        hapStack.spacing = 6
         hapStack.translatesAutoresizingMaskIntoConstraints = false
         hapticsCard.addSubview(hapStack)
         
@@ -848,8 +846,8 @@ class PopoverViewController: NSViewController {
         hapStack.addArrangedSubview(hapHeaderRow)
         hapHeaderRow.widthAnchor.constraint(equalTo: hapStack.widthAnchor).isActive = true
         
-        let hapTitle = NSTextField(labelWithString: "CoreHaptics Dual-Motor Rumble")
-        hapTitle.font = NSFont.systemFont(ofSize: 11, weight: .bold)
+        let hapTitle = NSTextField(labelWithString: "CoreHaptics Rumble")
+        hapTitle.font = NSFont.systemFont(ofSize: 10.5, weight: .bold)
         hapTitle.textColor = .secondaryLabelColor
         hapHeaderRow.addArrangedSubview(hapTitle)
         
@@ -858,7 +856,7 @@ class PopoverViewController: NSViewController {
         hapHeaderRow.addArrangedSubview(hapSpacer)
         
         intensityLabel = NSTextField(labelWithString: "\(Int(HapticBridge.shared.rumbleIntensity * 100))%")
-        intensityLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .bold)
+        intensityLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .bold)
         intensityLabel.textColor = .labelColor
         hapHeaderRow.addArrangedSubview(intensityLabel)
         
@@ -871,16 +869,16 @@ class PopoverViewController: NSViewController {
         let testBtn = NSButton(title: "Test Dual-Motor Vibration", target: self, action: #selector(testRumbleClicked))
         testBtn.bezelStyle = .rounded
         testBtn.controlSize = .small
-        testBtn.font = NSFont.systemFont(ofSize: 10.5, weight: .medium)
+        testBtn.font = NSFont.systemFont(ofSize: 10, weight: .medium)
         testBtn.translatesAutoresizingMaskIntoConstraints = false
         hapStack.addArrangedSubview(testBtn)
         testBtn.widthAnchor.constraint(equalTo: hapStack.widthAnchor).isActive = true
         
         NSLayoutConstraint.activate([
-            hapStack.topAnchor.constraint(equalTo: hapticsCard.topAnchor, constant: 10),
-            hapStack.leadingAnchor.constraint(equalTo: hapticsCard.leadingAnchor, constant: 12),
-            hapStack.trailingAnchor.constraint(equalTo: hapticsCard.trailingAnchor, constant: -12),
-            hapStack.bottomAnchor.constraint(equalTo: hapticsCard.bottomAnchor, constant: -10)
+            hapStack.topAnchor.constraint(equalTo: hapticsCard.topAnchor, constant: 8),
+            hapStack.leadingAnchor.constraint(equalTo: hapticsCard.leadingAnchor, constant: 10),
+            hapStack.trailingAnchor.constraint(equalTo: hapticsCard.trailingAnchor, constant: -10),
+            hapStack.bottomAnchor.constraint(equalTo: hapticsCard.bottomAnchor, constant: -8)
         ])
         
         // 3. Gyro Card
@@ -891,7 +889,7 @@ class PopoverViewController: NSViewController {
         let gyroStack = NSStackView()
         gyroStack.orientation = .vertical
         gyroStack.alignment = .leading
-        gyroStack.spacing = 8
+        gyroStack.spacing = 6
         gyroStack.translatesAutoresizingMaskIntoConstraints = false
         gyroCard.addSubview(gyroStack)
         
@@ -903,7 +901,7 @@ class PopoverViewController: NSViewController {
         gyroHeaderRow.widthAnchor.constraint(equalTo: gyroStack.widthAnchor).isActive = true
         
         let gyroTitle = NSTextField(labelWithString: "Adaptive Gyro Aiming")
-        gyroTitle.font = NSFont.systemFont(ofSize: 11, weight: .bold)
+        gyroTitle.font = NSFont.systemFont(ofSize: 10.5, weight: .bold)
         gyroTitle.textColor = .secondaryLabelColor
         gyroHeaderRow.addArrangedSubview(gyroTitle)
         
@@ -912,11 +910,11 @@ class PopoverViewController: NSViewController {
         gyroHeaderRow.addArrangedSubview(gyroSpacer)
         
         gyroSensLabel = NSTextField(labelWithString: "\(GyroEngine.shared.gyroSensitivity)%")
-        gyroSensLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .bold)
+        gyroSensLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .bold)
         gyroSensLabel.textColor = .labelColor
         gyroHeaderRow.addArrangedSubview(gyroSensLabel)
         
-        gyroSegment = NSSegmentedControl(labels: ["Off", "Stick", "1:1 Mouse (L2)", "Always"], trackingMode: .selectOne, target: self, action: #selector(gyroSegmentChanged(_:)))
+        gyroSegment = NSSegmentedControl(labels: ["Off", "Stick", "1:1 Aim", "Always"], trackingMode: .selectOne, target: self, action: #selector(gyroSegmentChanged(_:)))
         gyroSegment.selectedSegment = GyroEngine.shared.gyroMode
         gyroSegment.controlSize = .small
         gyroSegment.segmentDistribution = .fillEqually
@@ -931,17 +929,17 @@ class PopoverViewController: NSViewController {
         gyroSensitivitySlider.widthAnchor.constraint(equalTo: gyroStack.widthAnchor).isActive = true
         
         NSLayoutConstraint.activate([
-            gyroStack.topAnchor.constraint(equalTo: gyroCard.topAnchor, constant: 10),
-            gyroStack.leadingAnchor.constraint(equalTo: gyroCard.leadingAnchor, constant: 12),
-            gyroStack.trailingAnchor.constraint(equalTo: gyroCard.trailingAnchor, constant: -12),
-            gyroStack.bottomAnchor.constraint(equalTo: gyroCard.bottomAnchor, constant: -10)
+            gyroStack.topAnchor.constraint(equalTo: gyroCard.topAnchor, constant: 8),
+            gyroStack.leadingAnchor.constraint(equalTo: gyroCard.leadingAnchor, constant: 10),
+            gyroStack.trailingAnchor.constraint(equalTo: gyroCard.trailingAnchor, constant: -10),
+            gyroStack.bottomAnchor.constraint(equalTo: gyroCard.bottomAnchor, constant: -8)
         ])
         
         // 4. Footer Row
         let footerRow = NSStackView()
         footerRow.orientation = .horizontal
         footerRow.distribution = .fillEqually
-        footerRow.spacing = 10
+        footerRow.spacing = 8
         footerRow.translatesAutoresizingMaskIntoConstraints = false
         mainStack.addArrangedSubview(footerRow)
         footerRow.widthAnchor.constraint(equalTo: mainStack.widthAnchor).isActive = true
@@ -959,7 +957,7 @@ class PopoverViewController: NSViewController {
         let quitBtn = NSButton(title: "Quit DS4Link", target: self, action: #selector(quitClicked))
         quitBtn.bezelStyle = .inline
         quitBtn.controlSize = .small
-        quitBtn.font = NSFont.systemFont(ofSize: 10.5, weight: .regular)
+        quitBtn.font = NSFont.systemFont(ofSize: 10, weight: .regular)
         quitBtn.translatesAutoresizingMaskIntoConstraints = false
         mainStack.addArrangedSubview(quitBtn)
         quitBtn.widthAnchor.constraint(equalTo: mainStack.widthAnchor).isActive = true
@@ -969,7 +967,7 @@ class PopoverViewController: NSViewController {
         let box = NSView()
         box.wantsLayer = true
         box.layer?.backgroundColor = NSColor(white: 0.12, alpha: 0.6).cgColor
-        box.layer?.cornerRadius = 10
+        box.layer?.cornerRadius = 8
         box.layer?.borderWidth = 0.5
         box.layer?.borderColor = NSColor(white: 1.0, alpha: 0.1).cgColor
         box.translatesAutoresizingMaskIntoConstraints = false
@@ -1115,7 +1113,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     
     private func setupPopover() {
         let pop = NSPopover()
-        pop.contentSize = NSSize(width: 330, height: 440)
+        pop.contentSize = NSSize(width: 280, height: 410)
         pop.behavior = .transient
         pop.animates = true
         pop.contentViewController = PopoverViewController()
