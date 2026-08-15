@@ -709,13 +709,13 @@ class BSDUDPServer {
     }
 }
 
-// MARK: - Built-in Comprehensive Help, Guide & FAQ Center
+// MARK: - Built-in Comprehensive Help, Guide & FAQ Center (Rich Typography)
 class HelpWindowController: NSWindowController {
     static var shared: HelpWindowController?
     
     convenience init() {
         let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 680, height: 480),
+            contentRect: NSRect(x: 0, y: 0, width: 740, height: 530),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
@@ -723,7 +723,7 @@ class HelpWindowController: NSWindowController {
         win.title = "DS4Link Help, User Guide & FAQ Center"
         win.center()
         win.isReleasedWhenClosed = false
-        win.minSize = NSSize(width: 580, height: 420)
+        win.minSize = NSSize(width: 620, height: 440)
         
         let vc = HelpViewController()
         win.contentViewController = vc
@@ -836,7 +836,7 @@ class HelpViewController: NSViewController, NSTableViewDelegate, NSTableViewData
     ]
     
     override func loadView() {
-        let root = NSView(frame: NSRect(x: 0, y: 0, width: 680, height: 480))
+        let root = NSView(frame: NSRect(x: 0, y: 0, width: 740, height: 530))
         self.view = root
         
         let container = NSStackView()
@@ -858,18 +858,18 @@ class HelpViewController: NSViewController, NSTableViewDelegate, NSTableViewData
         let sidebarScroll = NSScrollView()
         sidebarScroll.hasVerticalScroller = true
         sidebarScroll.translatesAutoresizingMaskIntoConstraints = false
-        sidebarScroll.widthAnchor.constraint(equalToConstant: 210).isActive = true
+        sidebarScroll.widthAnchor.constraint(equalToConstant: 220).isActive = true
         
         tableView = NSTableView()
         tableView.headerView = nil
         tableView.backgroundColor = NSColor(white: 0.1, alpha: 0.85)
-        tableView.rowHeight = 38
+        tableView.rowHeight = 42
         tableView.delegate = self
         tableView.dataSource = self
         
         let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("topic"))
         col.title = "Topics"
-        col.width = 200
+        col.width = 210
         tableView.addTableColumn(col)
         sidebarScroll.documentView = tableView
         container.addArrangedSubview(sidebarScroll)
@@ -889,7 +889,7 @@ class HelpViewController: NSViewController, NSTableViewDelegate, NSTableViewData
         textView = NSTextView()
         textView.isEditable = false
         textView.isSelectable = true
-        textView.textContainerInset = NSSize(width: 20, height: 20)
+        textView.textContainerInset = NSSize(width: 24, height: 24)
         textView.backgroundColor = NSColor(white: 0.05, alpha: 0.95)
         contentScroll.documentView = textView
         container.addArrangedSubview(contentScroll)
@@ -912,7 +912,7 @@ class HelpViewController: NSViewController, NSTableViewDelegate, NSTableViewData
         let stack = NSStackView()
         stack.orientation = .horizontal
         stack.alignment = .centerY
-        stack.spacing = 8
+        stack.spacing = 10
         stack.translatesAutoresizingMaskIntoConstraints = false
         cell.addSubview(stack)
         
@@ -920,18 +920,18 @@ class HelpViewController: NSViewController, NSTableViewDelegate, NSTableViewData
         img.image = NSImage(systemSymbolName: item.icon, accessibilityDescription: nil)
         img.contentTintColor = NSColor(red: 0.35, green: 0.85, blue: 1.0, alpha: 1.0)
         img.translatesAutoresizingMaskIntoConstraints = false
-        img.widthAnchor.constraint(equalToConstant: 16).isActive = true
-        img.heightAnchor.constraint(equalToConstant: 16).isActive = true
+        img.widthAnchor.constraint(equalToConstant: 18).isActive = true
+        img.heightAnchor.constraint(equalToConstant: 18).isActive = true
         stack.addArrangedSubview(img)
         
         let label = NSTextField(labelWithString: item.title)
-        label.font = NSFont.systemFont(ofSize: 11.5, weight: .medium)
+        label.font = NSFont.systemFont(ofSize: 12.5, weight: .medium)
         label.textColor = .labelColor
         stack.addArrangedSubview(label)
         
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 10),
-            stack.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -10),
+            stack.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 12),
+            stack.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -12),
             stack.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
         ])
         
@@ -949,31 +949,56 @@ class HelpViewController: NSViewController, NSTableViewDelegate, NSTableViewData
         let topic = topics[index]
         let attr = NSMutableAttributedString()
         
+        // Paragraph Style with spacious line height and readability margins
+        let bodyParagraph = NSMutableParagraphStyle()
+        bodyParagraph.lineSpacing = 5.0
+        bodyParagraph.paragraphSpacing = 8.0
+        bodyParagraph.paragraphSpacingBefore = 2.0
+        
+        let headingParagraph = NSMutableParagraphStyle()
+        headingParagraph.paragraphSpacing = 12.0
+        headingParagraph.paragraphSpacingBefore = 4.0
+        
+        let subHeadingParagraph = NSMutableParagraphStyle()
+        subHeadingParagraph.paragraphSpacing = 8.0
+        subHeadingParagraph.paragraphSpacingBefore = 10.0
+        
         let lines = topic.content.components(separatedBy: .newlines)
         for line in lines {
             if line.starts(with: "# ") {
-                let text = String(line.dropFirst(2)) + "\n\n"
+                let text = String(line.dropFirst(2)) + "\n"
                 attr.append(NSAttributedString(string: text, attributes: [
-                    .font: NSFont.systemFont(ofSize: 18, weight: .heavy),
-                    .foregroundColor: NSColor(red: 0.35, green: 0.85, blue: 1.0, alpha: 1.0)
+                    .font: NSFont.systemFont(ofSize: 21, weight: .heavy),
+                    .foregroundColor: NSColor(red: 0.35, green: 0.85, blue: 1.0, alpha: 1.0),
+                    .paragraphStyle: headingParagraph
                 ]))
             } else if line.starts(with: "### ") {
                 let text = String(line.dropFirst(4)) + "\n"
                 attr.append(NSAttributedString(string: text, attributes: [
-                    .font: NSFont.systemFont(ofSize: 13, weight: .bold),
-                    .foregroundColor: NSColor(white: 0.95, alpha: 1.0)
+                    .font: NSFont.systemFont(ofSize: 14.5, weight: .bold),
+                    .foregroundColor: NSColor(white: 0.98, alpha: 1.0),
+                    .paragraphStyle: subHeadingParagraph
                 ]))
             } else if line.starts(with: "* ") {
-                let text = "  • " + String(line.dropFirst(2)) + "\n"
+                let text = "  •  " + String(line.dropFirst(2)) + "\n"
                 attr.append(NSAttributedString(string: text, attributes: [
-                    .font: NSFont.systemFont(ofSize: 11.5, weight: .regular),
-                    .foregroundColor: NSColor(white: 0.85, alpha: 1.0)
+                    .font: NSFont.systemFont(ofSize: 13.5, weight: .regular),
+                    .foregroundColor: NSColor(white: 0.88, alpha: 1.0),
+                    .paragraphStyle: bodyParagraph
+                ]))
+            } else if line.starts(with: "1. ") || line.starts(with: "2. ") || line.starts(with: "3. ") || line.starts(with: "4. ") {
+                let text = "  " + line + "\n"
+                attr.append(NSAttributedString(string: text, attributes: [
+                    .font: NSFont.systemFont(ofSize: 13.5, weight: .regular),
+                    .foregroundColor: NSColor(white: 0.88, alpha: 1.0),
+                    .paragraphStyle: bodyParagraph
                 ]))
             } else {
                 let text = line + "\n"
                 attr.append(NSAttributedString(string: text, attributes: [
-                    .font: NSFont.systemFont(ofSize: 11.5, weight: .regular),
-                    .foregroundColor: NSColor(white: 0.8, alpha: 1.0)
+                    .font: NSFont.systemFont(ofSize: 13.5, weight: .regular),
+                    .foregroundColor: NSColor(white: 0.82, alpha: 1.0),
+                    .paragraphStyle: bodyParagraph
                 ]))
             }
         }
