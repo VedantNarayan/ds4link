@@ -25,20 +25,20 @@ func writeLog(_ message: String) {
 
 // MARK: - Game Engine DNA & Adaptive Profile Engine
 enum GameEngineType: String {
-    case sonyFirstParty = "Sony First-Party (Decima/Insomniac)"
+    case sonyFirstParty = "Sony First-Party"
     case reEngine = "Capcom RE Engine"
     case forzaTech = "Turn 10 ForzaTech"
     case unity = "Unity Engine"
     case unrealEngine = "Unreal Engine"
-    case standardDirectX = "Universal DirectX / Custom"
+    case standardDirectX = "Universal DirectX"
 }
 
 struct EngineProfile {
     let engine: GameEngineType
-    let defaultGyroMode: Int       // 1 = Stick (Anti-Flicker), 2 = 1:1 Mouse (Aim L2)
-    let enableTouchpadToMap: Bool  // Touchpad click -> Gamepad Map/Back
-    let impulseTriggerHaptics: Bool// Synthesize trigger brake/throttle rumble
-    let isolateDInput: Bool        // Prevent Player 2 ghost duplication
+    let defaultGyroMode: Int
+    let enableTouchpadToMap: Bool
+    let impulseTriggerHaptics: Bool
+    let isolateDInput: Bool
 }
 
 class EngineProfileManager {
@@ -51,47 +51,53 @@ class EngineProfileManager {
         let folderName = gameFolder.lastPathComponent.lowercased()
         
         var profile: EngineProfile
+        var cleanTitle = exeName.replacingOccurrences(of: ".exe", with: "").replacingOccurrences(of: ".EXE", with: "")
         
-        // 1. Capcom RE Engine (Resident Evil 2/3/4/7/8, DMC5, Monster Hunter)
+        // Clean game title formatting
+        if cleanTitle.lowercased().contains("wewerehere") {
+            cleanTitle = "We Were Here Together"
+        }
+        
+        // 1. Capcom RE Engine
         if nameLower.contains("re2") || nameLower.contains("re3") || nameLower.contains("re4") ||
            nameLower.contains("re7") || nameLower.contains("re8") || nameLower.contains("devilmaycry") ||
            nameLower.contains("monsterhunter") || FileManager.default.fileExists(atPath: gameFolder.appendingPathComponent("re_chunk_000.pak").path) {
             profile = EngineProfile(engine: .reEngine, defaultGyroMode: 1, enableTouchpadToMap: true, impulseTriggerHaptics: false, isolateDInput: true)
-            activeGameName = "Resident Evil / RE Engine Title"
+            activeGameName = "Resident Evil"
         }
-        // 2. Sony First-Party Games (Spider-Man, Miles Morales, Horizon, God of War, Tsushima, TLOU)
+        // 2. Sony First-Party Games
         else if nameLower.contains("spider") || nameLower.contains("miles") || nameLower.contains("horizon") ||
                 nameLower.contains("godofwar") || nameLower.contains("tsushima") || nameLower.contains("tlou") ||
                 nameLower.contains("uncharted") || nameLower.contains("returnal") {
             profile = EngineProfile(engine: .sonyFirstParty, defaultGyroMode: 2, enableTouchpadToMap: true, impulseTriggerHaptics: true, isolateDInput: true)
-            activeGameName = "PlayStation PC Port"
+            activeGameName = cleanTitle.capitalized
         }
-        // 3. ForzaTech (Forza Horizon 4/5, Motorsport)
+        // 3. ForzaTech
         else if nameLower.contains("forzahorizon") || nameLower.contains("forzamotorsport") || nameLower.contains("forza") {
             profile = EngineProfile(engine: .forzaTech, defaultGyroMode: 1, enableTouchpadToMap: false, impulseTriggerHaptics: true, isolateDInput: true)
-            activeGameName = "Forza Horizon / Motorsport"
+            activeGameName = "Forza Horizon"
         }
-        // 4. Unity Engine (We Were Here, Subnautica, Hollow Knight, Cuphead, etc.)
+        // 4. Unity Engine
         else if FileManager.default.fileExists(atPath: gameFolder.appendingPathComponent("UnityPlayer.dll").path) ||
                 folderName.contains("wewerehere") || folderName.contains("subnautica") {
             profile = EngineProfile(engine: .unity, defaultGyroMode: 2, enableTouchpadToMap: true, impulseTriggerHaptics: false, isolateDInput: true)
-            activeGameName = folderName.capitalized
+            activeGameName = cleanTitle.capitalized
         }
-        // 5. Unreal Engine (Jedi Survivor, Stalker 2, Black Myth, Avatar, Fortnite, etc.)
+        // 5. Unreal Engine
         else if FileManager.default.fileExists(atPath: gameFolder.appendingPathComponent("Engine").path) ||
                 nameLower.contains("shipping") || nameLower.contains("avatar") {
             profile = EngineProfile(engine: .unrealEngine, defaultGyroMode: 2, enableTouchpadToMap: true, impulseTriggerHaptics: false, isolateDInput: true)
-            activeGameName = "Unreal Engine Title"
+            activeGameName = cleanTitle.capitalized
         }
         // 6. Universal Default
         else {
             profile = EngineProfile(engine: .standardDirectX, defaultGyroMode: 2, enableTouchpadToMap: true, impulseTriggerHaptics: false, isolateDInput: true)
-            activeGameName = exeName.replacingOccurrences(of: ".exe", with: "").capitalized
+            activeGameName = cleanTitle.capitalized
         }
         
         self.activeEngine = profile.engine
         GyroEngine.shared.gyroMode = profile.defaultGyroMode
-        writeLog("[Engine-DNA] Auto-Configured for: \(profile.engine.rawValue) (\(activeGameName)) | Gyro: \(profile.defaultGyroMode == 1 ? "Stick (Anti-Flicker)" : "1:1 Mouse") | Touchpad: \(profile.enableTouchpadToMap)")
+        writeLog("[Engine-DNA] Profile active: \(profile.engine.rawValue) (\(activeGameName))")
         
         DispatchQueue.main.async {
             PopoverViewController.shared?.updateUI()
@@ -213,7 +219,7 @@ func autoPatchAllBottles() {
             try? newUserLines.joined(separator: "\n").write(to: userReg, atomically: true, encoding: .utf8)
         }
         
-        // 3. Global System32 Driver Deployment (Anti-Cheat & Root-directory Isolation)
+        // 3. Global System32 Driver Deployment
         let sys32Dir = bottleDir.appendingPathComponent("drive_c/windows/system32")
         let syswowDir = bottleDir.appendingPathComponent("drive_c/windows/syswow64")
         
@@ -337,13 +343,12 @@ class GyroEngine {
     private var timer: DispatchSourceTimer?
     private var isStreaming = false
     
-    // Deadband and Rate-Limiting State
     private var lastSentPitch: Int16 = 0
     private var lastSentYaw: Int16 = 0
     private var lastSentRoll: Int16 = 0
     private var idleCount: Int = 0
     
-    var gyroMode: Int { // 0 = Off, 1 = Stick Emulation (Anti-Flicker), 2 = 1:1 Mouse Delta (Aim L2), 3 = 1:1 Mouse Delta (Always)
+    var gyroMode: Int {
         get {
             let val = UserDefaults.standard.integer(forKey: "gyroMode")
             return val == 0 ? 2 : val
@@ -371,7 +376,7 @@ class GyroEngine {
         
         let queue = DispatchQueue(label: "com.antigravity.gyroengine", qos: .userInteractive)
         let t = DispatchSource.makeTimerSource(queue: queue)
-        t.schedule(deadline: .now(), repeating: .milliseconds(8)) // 120Hz
+        t.schedule(deadline: .now(), repeating: .milliseconds(8))
         t.setEventHandler { [weak self] in
             self?.pollAndStreamGyro()
         }
@@ -390,7 +395,6 @@ class GyroEngine {
         let yawRate = Int16(clamping: Int(rot.y * 57.2958 * 100.0))
         let rollRate = Int16(clamping: Int(rot.z * 57.2958 * 100.0))
         
-        // Deadband Filter
         let deltaPitch = abs(Int(pitchRate) - Int(lastSentPitch))
         let deltaYaw = abs(Int(yawRate) - Int(lastSentYaw))
         let deltaRoll = abs(Int(rollRate) - Int(lastSentRoll))
@@ -428,7 +432,7 @@ class GyroEngine {
     }
 }
 
-// MARK: - Apple CoreHaptics Engine with Impulse Trigger Synthesizer
+// MARK: - Apple CoreHaptics Engine
 class HapticBridge: NSObject {
     static let shared = HapticBridge()
     
@@ -484,13 +488,6 @@ class HapticBridge: NSObject {
     
     private func setupController(_ controller: GCController) {
         currentController = controller
-        
-        // Touchpad mapping (Touchpad button -> Gamepad Map/Back)
-        controller.extendedGamepad?.buttonOptions?.pressedChangedHandler = { _, _, pressed in
-            if pressed {
-                writeLog("[Input] Touchpad / Options button pressed.")
-            }
-        }
         
         guard let haptics = controller.haptics else {
             onControllerStatusChanged?()
@@ -713,7 +710,7 @@ class BSDUDPServer {
     }
 }
 
-// MARK: - Native macOS Menu Bar Popover Control Center
+// MARK: - Pixel-Perfect Native macOS Popover Control Center (AutoLayout)
 class PopoverViewController: NSViewController {
     static var shared: PopoverViewController?
     
@@ -734,140 +731,248 @@ class PopoverViewController: NSViewController {
     
     override func loadView() {
         PopoverViewController.shared = self
-        let view = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 430))
-        self.view = view
-        view.wantsLayer = true
+        let root = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 460))
+        self.view = root
+        root.wantsLayer = true
         
-        // 1. Header Card
-        let headerBox = createCardView(frame: NSRect(x: 14, y: 336, width: 312, height: 82))
-        view.addSubview(headerBox)
+        let mainStack = NSStackView()
+        mainStack.orientation = .vertical
+        mainStack.alignment = .leading
+        mainStack.distribution = .fill
+        mainStack.spacing = 10
+        mainStack.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(mainStack)
         
-        let iconView = NSImageView(frame: NSRect(x: 12, y: 28, width: 34, height: 34))
+        NSLayoutConstraint.activate([
+            mainStack.topAnchor.constraint(equalTo: root.topAnchor, constant: 14),
+            mainStack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 14),
+            mainStack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -14),
+            mainStack.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -14)
+        ])
+        
+        // 1. Header Card (Device & Game DNA)
+        let headerCard = createCardView()
+        mainStack.addArrangedSubview(headerCard)
+        headerCard.widthAnchor.constraint(equalTo: mainStack.widthAnchor).isActive = true
+        
+        let headerContent = NSStackView()
+        headerContent.orientation = .horizontal
+        headerContent.alignment = .centerY
+        headerContent.spacing = 12
+        headerContent.translatesAutoresizingMaskIntoConstraints = false
+        headerCard.addSubview(headerContent)
+        
+        let iconView = NSImageView()
         iconView.image = NSImage(systemSymbolName: "gamecontroller.fill", accessibilityDescription: nil)
         iconView.contentTintColor = NSColor(red: 0.35, green: 0.85, blue: 1.0, alpha: 1.0)
-        headerBox.addSubview(iconView)
+        iconView.translatesAutoresizingMaskIntoConstraints = false
+        iconView.widthAnchor.constraint(equalToConstant: 32).isActive = true
+        iconView.heightAnchor.constraint(equalToConstant: 32).isActive = true
+        headerContent.addArrangedSubview(iconView)
+        
+        let textStack = NSStackView()
+        textStack.orientation = .vertical
+        textStack.alignment = .leading
+        textStack.spacing = 2
+        textStack.translatesAutoresizingMaskIntoConstraints = false
+        headerContent.addArrangedSubview(textStack)
+        
+        let topRow = NSStackView()
+        topRow.orientation = .horizontal
+        topRow.alignment = .centerY
+        topRow.distribution = .fill
+        topRow.translatesAutoresizingMaskIntoConstraints = false
+        textStack.addArrangedSubview(topRow)
+        topRow.widthAnchor.constraint(equalTo: textStack.widthAnchor).isActive = true
         
         controllerNameLabel = NSTextField(labelWithString: "DUALSHOCK 4")
         controllerNameLabel.font = NSFont.systemFont(ofSize: 13, weight: .bold)
         controllerNameLabel.textColor = .labelColor
-        controllerNameLabel.frame = NSRect(x: 54, y: 56, width: 170, height: 18)
-        headerBox.addSubview(controllerNameLabel)
+        topRow.addArrangedSubview(controllerNameLabel)
         
-        connectionSubLabel = NSTextField(labelWithString: "Bluetooth • Universal Auto-Hook")
-        connectionSubLabel.font = NSFont.systemFont(ofSize: 10, weight: .medium)
-        connectionSubLabel.textColor = .secondaryLabelColor
-        connectionSubLabel.frame = NSRect(x: 54, y: 38, width: 170, height: 15)
-        headerBox.addSubview(connectionSubLabel)
+        let spacer = NSView()
+        spacer.translatesAutoresizingMaskIntoConstraints = false
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        topRow.addArrangedSubview(spacer)
         
-        engineBadge = NSTextField(labelWithString: "⚡ Engine: Universal Game")
-        engineBadge.font = NSFont.systemFont(ofSize: 9.5, weight: .semibold)
-        engineBadge.textColor = NSColor(red: 0.4, green: 0.8, blue: 1.0, alpha: 1.0)
-        engineBadge.frame = NSRect(x: 54, y: 20, width: 250, height: 14)
-        headerBox.addSubview(engineBadge)
-        
-        audioStatusLabel = NSTextField(labelWithString: "🔊 Speaker: Requires USB")
-        audioStatusLabel.font = NSFont.systemFont(ofSize: 9.0, weight: .regular)
-        audioStatusLabel.textColor = .tertiaryLabelColor
-        audioStatusLabel.frame = NSRect(x: 54, y: 6, width: 170, height: 13)
-        headerBox.addSubview(audioStatusLabel)
-        
-        batteryBadge = NSTextField(labelWithString: "25%")
-        batteryBadge.font = NSFont.systemFont(ofSize: 11, weight: .bold)
+        batteryBadge = NSTextField(labelWithString: " 25% ")
+        batteryBadge.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .bold)
         batteryBadge.alignment = .center
         batteryBadge.textColor = NSColor(red: 0.25, green: 0.85, blue: 0.45, alpha: 1.0)
         batteryBadge.backgroundColor = NSColor(red: 0.25, green: 0.85, blue: 0.45, alpha: 0.15)
         batteryBadge.drawsBackground = true
         batteryBadge.wantsLayer = true
-        batteryBadge.layer?.cornerRadius = 6
+        batteryBadge.layer?.cornerRadius = 5
         batteryBadge.layer?.masksToBounds = true
-        batteryBadge.frame = NSRect(x: 232, y: 36, width: 68, height: 22)
-        headerBox.addSubview(batteryBadge)
+        topRow.addArrangedSubview(batteryBadge)
+        
+        connectionSubLabel = NSTextField(labelWithString: "Bluetooth • Universal Auto-Hook")
+        connectionSubLabel.font = NSFont.systemFont(ofSize: 10, weight: .medium)
+        connectionSubLabel.textColor = .secondaryLabelColor
+        textStack.addArrangedSubview(connectionSubLabel)
+        
+        engineBadge = NSTextField(labelWithString: "⚡ Universal Game Engine")
+        engineBadge.font = NSFont.systemFont(ofSize: 9.5, weight: .semibold)
+        engineBadge.textColor = NSColor(red: 0.4, green: 0.8, blue: 1.0, alpha: 1.0)
+        engineBadge.lineBreakMode = .byTruncatingTail
+        textStack.addArrangedSubview(engineBadge)
+        
+        audioStatusLabel = NSTextField(labelWithString: "🔊 Speaker: Requires USB Cable")
+        audioStatusLabel.font = NSFont.systemFont(ofSize: 9.0, weight: .regular)
+        audioStatusLabel.textColor = .tertiaryLabelColor
+        textStack.addArrangedSubview(audioStatusLabel)
+        
+        NSLayoutConstraint.activate([
+            headerContent.topAnchor.constraint(equalTo: headerCard.topAnchor, constant: 10),
+            headerContent.leadingAnchor.constraint(equalTo: headerCard.leadingAnchor, constant: 12),
+            headerContent.trailingAnchor.constraint(equalTo: headerCard.trailingAnchor, constant: -12),
+            headerContent.bottomAnchor.constraint(equalTo: headerCard.bottomAnchor, constant: -10)
+        ])
         
         // 2. Haptics Card
-        let hapticsCard = createCardView(frame: NSRect(x: 14, y: 236, width: 312, height: 90))
-        view.addSubview(hapticsCard)
+        let hapticsCard = createCardView()
+        mainStack.addArrangedSubview(hapticsCard)
+        hapticsCard.widthAnchor.constraint(equalTo: mainStack.widthAnchor).isActive = true
+        
+        let hapStack = NSStackView()
+        hapStack.orientation = .vertical
+        hapStack.alignment = .leading
+        hapStack.spacing = 8
+        hapStack.translatesAutoresizingMaskIntoConstraints = false
+        hapticsCard.addSubview(hapStack)
+        
+        let hapHeaderRow = NSStackView()
+        hapHeaderRow.orientation = .horizontal
+        hapHeaderRow.alignment = .centerY
+        hapHeaderRow.translatesAutoresizingMaskIntoConstraints = false
+        hapStack.addArrangedSubview(hapHeaderRow)
+        hapHeaderRow.widthAnchor.constraint(equalTo: hapStack.widthAnchor).isActive = true
         
         let hapTitle = NSTextField(labelWithString: "CoreHaptics Dual-Motor Rumble")
         hapTitle.font = NSFont.systemFont(ofSize: 11, weight: .bold)
         hapTitle.textColor = .secondaryLabelColor
-        hapTitle.frame = NSRect(x: 12, y: 64, width: 200, height: 16)
-        hapticsCard.addSubview(hapTitle)
+        hapHeaderRow.addArrangedSubview(hapTitle)
+        
+        let hapSpacer = NSView()
+        hapSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        hapHeaderRow.addArrangedSubview(hapSpacer)
         
         intensityLabel = NSTextField(labelWithString: "\(Int(HapticBridge.shared.rumbleIntensity * 100))%")
         intensityLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .bold)
-        intensityLabel.alignment = .right
         intensityLabel.textColor = .labelColor
-        intensityLabel.frame = NSRect(x: 240, y: 64, width: 60, height: 16)
-        hapticsCard.addSubview(intensityLabel)
+        hapHeaderRow.addArrangedSubview(intensityLabel)
         
         intensitySlider = NSSlider(value: Double(HapticBridge.shared.rumbleIntensity * 100), minValue: 0, maxValue: 100, target: self, action: #selector(intensityChanged(_:)))
         intensitySlider.controlSize = .small
-        intensitySlider.frame = NSRect(x: 12, y: 38, width: 288, height: 18)
-        hapticsCard.addSubview(intensitySlider)
+        intensitySlider.translatesAutoresizingMaskIntoConstraints = false
+        hapStack.addArrangedSubview(intensitySlider)
+        intensitySlider.widthAnchor.constraint(equalTo: hapStack.widthAnchor).isActive = true
         
-        let testBtn = NSButton(title: "Test Vibration", target: self, action: #selector(testRumbleClicked))
-        testBtn.bezelStyle = .inline
-        testBtn.controlSize = .mini
-        testBtn.font = NSFont.systemFont(ofSize: 10, weight: .semibold)
-        testBtn.frame = NSRect(x: 12, y: 12, width: 288, height: 20)
-        hapticsCard.addSubview(testBtn)
+        let testBtn = NSButton(title: "Test Dual-Motor Vibration", target: self, action: #selector(testRumbleClicked))
+        testBtn.bezelStyle = .rounded
+        testBtn.controlSize = .small
+        testBtn.font = NSFont.systemFont(ofSize: 10.5, weight: .medium)
+        testBtn.translatesAutoresizingMaskIntoConstraints = false
+        hapStack.addArrangedSubview(testBtn)
+        testBtn.widthAnchor.constraint(equalTo: hapStack.widthAnchor).isActive = true
+        
+        NSLayoutConstraint.activate([
+            hapStack.topAnchor.constraint(equalTo: hapticsCard.topAnchor, constant: 10),
+            hapStack.leadingAnchor.constraint(equalTo: hapticsCard.leadingAnchor, constant: 12),
+            hapStack.trailingAnchor.constraint(equalTo: hapticsCard.trailingAnchor, constant: -12),
+            hapStack.bottomAnchor.constraint(equalTo: hapticsCard.bottomAnchor, constant: -10)
+        ])
         
         // 3. Gyro Card
-        let gyroCard = createCardView(frame: NSRect(x: 14, y: 124, width: 312, height: 102))
-        view.addSubview(gyroCard)
+        let gyroCard = createCardView()
+        mainStack.addArrangedSubview(gyroCard)
+        gyroCard.widthAnchor.constraint(equalTo: mainStack.widthAnchor).isActive = true
+        
+        let gyroStack = NSStackView()
+        gyroStack.orientation = .vertical
+        gyroStack.alignment = .leading
+        gyroStack.spacing = 8
+        gyroStack.translatesAutoresizingMaskIntoConstraints = false
+        gyroCard.addSubview(gyroStack)
+        
+        let gyroHeaderRow = NSStackView()
+        gyroHeaderRow.orientation = .horizontal
+        gyroHeaderRow.alignment = .centerY
+        gyroHeaderRow.translatesAutoresizingMaskIntoConstraints = false
+        gyroStack.addArrangedSubview(gyroHeaderRow)
+        gyroHeaderRow.widthAnchor.constraint(equalTo: gyroStack.widthAnchor).isActive = true
         
         let gyroTitle = NSTextField(labelWithString: "Adaptive Gyro Aiming")
         gyroTitle.font = NSFont.systemFont(ofSize: 11, weight: .bold)
         gyroTitle.textColor = .secondaryLabelColor
-        gyroTitle.frame = NSRect(x: 12, y: 76, width: 200, height: 16)
-        gyroCard.addSubview(gyroTitle)
+        gyroHeaderRow.addArrangedSubview(gyroTitle)
+        
+        let gyroSpacer = NSView()
+        gyroSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        gyroHeaderRow.addArrangedSubview(gyroSpacer)
         
         gyroSensLabel = NSTextField(labelWithString: "\(GyroEngine.shared.gyroSensitivity)%")
         gyroSensLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .bold)
-        gyroSensLabel.alignment = .right
         gyroSensLabel.textColor = .labelColor
-        gyroSensLabel.frame = NSRect(x: 240, y: 76, width: 60, height: 16)
-        gyroCard.addSubview(gyroSensLabel)
+        gyroHeaderRow.addArrangedSubview(gyroSensLabel)
         
-        gyroSegment = NSSegmentedControl(labels: ["Off", "Stick", "1:1 Mouse (L2)", "Mouse Always"], trackingMode: .selectOne, target: self, action: #selector(gyroSegmentChanged(_:)))
+        gyroSegment = NSSegmentedControl(labels: ["Off", "Stick", "1:1 Mouse (L2)", "Always"], trackingMode: .selectOne, target: self, action: #selector(gyroSegmentChanged(_:)))
         gyroSegment.selectedSegment = GyroEngine.shared.gyroMode
         gyroSegment.controlSize = .small
-        gyroSegment.frame = NSRect(x: 12, y: 46, width: 288, height: 22)
-        gyroCard.addSubview(gyroSegment)
+        gyroSegment.segmentDistribution = .fillEqually
+        gyroSegment.translatesAutoresizingMaskIntoConstraints = false
+        gyroStack.addArrangedSubview(gyroSegment)
+        gyroSegment.widthAnchor.constraint(equalTo: gyroStack.widthAnchor).isActive = true
         
         gyroSensitivitySlider = NSSlider(value: Double(GyroEngine.shared.gyroSensitivity), minValue: 20, maxValue: 250, target: self, action: #selector(gyroSensChanged(_:)))
         gyroSensitivitySlider.controlSize = .small
-        gyroSensitivitySlider.frame = NSRect(x: 12, y: 16, width: 288, height: 18)
-        gyroCard.addSubview(gyroSensitivitySlider)
+        gyroSensitivitySlider.translatesAutoresizingMaskIntoConstraints = false
+        gyroStack.addArrangedSubview(gyroSensitivitySlider)
+        gyroSensitivitySlider.widthAnchor.constraint(equalTo: gyroStack.widthAnchor).isActive = true
         
-        // 4. Footer Actions
+        NSLayoutConstraint.activate([
+            gyroStack.topAnchor.constraint(equalTo: gyroCard.topAnchor, constant: 10),
+            gyroStack.leadingAnchor.constraint(equalTo: gyroCard.leadingAnchor, constant: 12),
+            gyroStack.trailingAnchor.constraint(equalTo: gyroCard.trailingAnchor, constant: -12),
+            gyroStack.bottomAnchor.constraint(equalTo: gyroCard.bottomAnchor, constant: -10)
+        ])
+        
+        // 4. Footer Row
+        let footerRow = NSStackView()
+        footerRow.orientation = .horizontal
+        footerRow.distribution = .fillEqually
+        footerRow.spacing = 10
+        footerRow.translatesAutoresizingMaskIntoConstraints = false
+        mainStack.addArrangedSubview(footerRow)
+        footerRow.widthAnchor.constraint(equalTo: mainStack.widthAnchor).isActive = true
+        
         let syncBtn = NSButton(title: "Re-Scan Bottles", target: self, action: #selector(syncBottlesClicked))
         syncBtn.bezelStyle = .rounded
         syncBtn.controlSize = .small
-        syncBtn.frame = NSRect(x: 14, y: 46, width: 150, height: 26)
-        view.addSubview(syncBtn)
+        footerRow.addArrangedSubview(syncBtn)
         
         let logsBtn = NSButton(title: "Open Console", target: self, action: #selector(openLogsClicked))
         logsBtn.bezelStyle = .rounded
         logsBtn.controlSize = .small
-        logsBtn.frame = NSRect(x: 176, y: 46, width: 150, height: 26)
-        view.addSubview(logsBtn)
+        footerRow.addArrangedSubview(logsBtn)
         
-        let quitBtn = NSButton(title: "Quit Driver", target: self, action: #selector(quitClicked))
+        let quitBtn = NSButton(title: "Quit DS4Link", target: self, action: #selector(quitClicked))
         quitBtn.bezelStyle = .inline
         quitBtn.controlSize = .small
-        quitBtn.font = NSFont.systemFont(ofSize: 10, weight: .regular)
-        quitBtn.frame = NSRect(x: 14, y: 14, width: 312, height: 20)
-        view.addSubview(quitBtn)
+        quitBtn.font = NSFont.systemFont(ofSize: 10.5, weight: .regular)
+        quitBtn.translatesAutoresizingMaskIntoConstraints = false
+        mainStack.addArrangedSubview(quitBtn)
+        quitBtn.widthAnchor.constraint(equalTo: mainStack.widthAnchor).isActive = true
     }
     
-    private func createCardView(frame: NSRect) -> NSView {
-        let box = NSView(frame: frame)
+    private func createCardView() -> NSView {
+        let box = NSView()
         box.wantsLayer = true
         box.layer?.backgroundColor = NSColor(white: 0.12, alpha: 0.6).cgColor
         box.layer?.cornerRadius = 10
         box.layer?.borderWidth = 0.5
         box.layer?.borderColor = NSColor(white: 1.0, alpha: 0.1).cgColor
+        box.translatesAutoresizingMaskIntoConstraints = false
         return box
     }
     
@@ -882,11 +987,11 @@ class PopoverViewController: NSViewController {
     func updateUI() {
         guard let controller = HapticBridge.shared.getCurrentController() else {
             controllerNameLabel.stringValue = "Disconnected"
-            batteryBadge.stringValue = "Off"
+            batteryBadge.stringValue = " Off "
             batteryBadge.textColor = .secondaryLabelColor
             batteryBadge.backgroundColor = NSColor(white: 0.5, alpha: 0.15)
             connectionSubLabel.stringValue = "Turn on DualShock 4"
-            engineBadge.stringValue = "⚡ Engine: Waiting for Game..."
+            engineBadge.stringValue = "⚡ Waiting for Game..."
             audioStatusLabel.stringValue = "🔊 Speaker: Disconnected"
             AppDelegate.shared?.updateStatusIcon(connected: false, batteryPct: nil, isCharging: false)
             return
@@ -904,11 +1009,11 @@ class PopoverViewController: NSViewController {
         
         if let batt = HapticBridge.shared.getBatteryInfo() {
             let chargeIcon = batt.isCharging ? "⚡ " : ""
-            batteryBadge.stringValue = "\(chargeIcon)\(batt.level)%"
+            batteryBadge.stringValue = " \(chargeIcon)\(batt.level)% "
             batteryBadge.textColor = batt.level <= 15 ? NSColor(red: 1.0, green: 0.35, blue: 0.35, alpha: 1.0) : NSColor(red: 0.25, green: 0.85, blue: 0.45, alpha: 1.0)
             AppDelegate.shared?.updateStatusIcon(connected: true, batteryPct: batt.level, isCharging: batt.isCharging)
         } else {
-            batteryBadge.stringValue = "Ready"
+            batteryBadge.stringValue = " Ready "
             AppDelegate.shared?.updateStatusIcon(connected: true, batteryPct: nil, isCharging: false)
         }
     }
@@ -1010,7 +1115,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     
     private func setupPopover() {
         let pop = NSPopover()
-        pop.contentSize = NSSize(width: 340, height: 430)
+        pop.contentSize = NSSize(width: 330, height: 440)
         pop.behavior = .transient
         pop.animates = true
         pop.contentViewController = PopoverViewController()
