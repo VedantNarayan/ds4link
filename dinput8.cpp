@@ -1,75 +1,90 @@
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <windows.h>
+#include <dinput.h>
+#include <stdio.h>
 
-// Function pointer types for dinput8 exports
-typedef HRESULT (WINAPI *DirectInput8Create_t)(HINSTANCE, DWORD, REFIID, LPVOID *, LPUNKNOWN);
-typedef HRESULT (WINAPI *DllCanUnloadNow_t)();
-typedef HRESULT (WINAPI *DllGetClassObject_t)(REFCLSID, REFIID, LPVOID *);
-typedef HRESULT (WINAPI *DllRegisterServer_t)();
-typedef HRESULT (WINAPI *DllUnregisterServer_t)();
+#pragma comment(lib, "ws2_32.lib")
 
-static HMODULE hOrigDll = NULL;
-static DirectInput8Create_t orig_DirectInput8Create = NULL;
-static DllCanUnloadNow_t orig_DllCanUnloadNow = NULL;
-static DllGetClassObject_t orig_DllGetClassObject = NULL;
-static DllRegisterServer_t orig_DllRegisterServer = NULL;
-static DllUnregisterServer_t orig_DllUnregisterServer = NULL;
+static HMODULE hOrigDInputDll = NULL;
+static SOCKET udp_socket = INVALID_SOCKET;
+static sockaddr_in server_addr;
+static bool g_udp_initialized = false;
 
-static void LoadOriginalDll() {
-    if (!hOrigDll) {
-        char path[MAX_PATH];
-        GetSystemDirectoryA(path, MAX_PATH);
-        strcat(path, "\\dinput8.dll");
-        hOrigDll = LoadLibraryA(path);
-        if (hOrigDll) {
-            orig_DirectInput8Create = (DirectInput8Create_t)GetProcAddress(hOrigDll, "DirectInput8Create");
-            orig_DllCanUnloadNow = (DllCanUnloadNow_t)GetProcAddress(hOrigDll, "DllCanUnloadNow");
-            orig_DllGetClassObject = (DllGetClassObject_t)GetProcAddress(hOrigDll, "DllGetClassObject");
-            orig_DllRegisterServer = (DllRegisterServer_t)GetProcAddress(hOrigDll, "DllRegisterServer");
-            orig_DllUnregisterServer = (DllUnregisterServer_t)GetProcAddress(hOrigDll, "DllUnregisterServer");
-        }
+static void InitUDP() {
+    if (g_udp_initialized) return;
+    WSADATA wsa;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) == 0) {
+        udp_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        server_addr.sin_family = AF_INET;
+        server_addr.sin_port = htons(24680);
+        server_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+        g_udp_initialized = true;
     }
 }
 
-extern "C" __declspec(dllexport) HRESULT WINAPI DirectInput8Create(HINSTANCE hinst, DWORD dwVersion, REFIID riidltf, LPVOID *ppvOut, LPUNKNOWN punkOuter) {
+static void SendRumbleUDP(BYTE left, BYTE right) {
+    if (!g_udp_initialized) InitUDP();
+    if (udp_socket != INVALID_SOCKET) {
+        unsigned char packet[3];
+        packet[0] = 0x01;
+        packet[1] = left;
+        packet[2] = right;
+        sendto(udp_socket, (const char*)packet, 3, 0, (sockaddr*)&server_addr, sizeof(server_addr));
+    }
+}
+
+typedef HRESULT (WINAPI *DirectInput8Create_t)(HINSTANCE, DWORD, REFIID, LPVOID*, LPUNKNOWN);
+static DirectInput8Create_t orig_DirectInput8Create = NULL;
+
+static void LoadOriginalDll() {
+    if (hOrigDInputDll) return;
+    char sysDir[MAX_PATH];
+    GetSystemDirectoryA(sysDir, MAX_PATH);
+    char dllPath[MAX_PATH];
+    snprintf(dllPath, sizeof(dllPath), "%s\\dinput8.dll", sysDir);
+    hOrigDInputDll = LoadLibraryA(dllPath);
+    if (hOrigDInputDll) {
+        orig_DirectInput8Create = (DirectInput8Create_t)GetProcAddress(hOrigDInputDll, "DirectInput8Create");
+    }
+}
+
+extern "C" {
+
+__declspec(dllexport) HRESULT WINAPI DirectInput8Create(HINSTANCE hinst, DWORD dwVersion, REFIID riidltf, LPVOID* ppvOut, LPUNKNOWN punkOuter) {
     LoadOriginalDll();
     if (orig_DirectInput8Create) {
         return orig_DirectInput8Create(hinst, dwVersion, riidltf, ppvOut, punkOuter);
     }
-    return E_FAIL;
+    return DIERR_NOTINITIALIZED;
 }
 
-extern "C" __declspec(dllexport) HRESULT WINAPI DllCanUnloadNow() {
-    LoadOriginalDll();
-    if (orig_DllCanUnloadNow) {
-        return orig_DllCanUnloadNow();
-    }
+__declspec(dllexport) HRESULT WINAPI DllCanUnloadNow(void) {
     return S_OK;
 }
 
-extern "C" __declspec(dllexport) HRESULT WINAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, LPVOID *ppv) {
+__declspec(dllexport) HRESULT WINAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, LPVOID* ppv) {
     LoadOriginalDll();
-    if (orig_DllGetClassObject) {
-        return orig_DllGetClassObject(rclsid, riid, ppv);
-    }
-    return E_FAIL;
+    typedef HRESULT (WINAPI *DllGetClassObject_t)(REFCLSID, REFIID, LPVOID*);
+    DllGetClassObject_t orig = (DllGetClassObject_t)GetProcAddress(hOrigDInputDll, "DllGetClassObject");
+    if (orig) return orig(rclsid, riid, ppv);
+    return CLASS_E_CLASSNOTAVAILABLE;
 }
 
-extern "C" __declspec(dllexport) HRESULT WINAPI DllRegisterServer() {
-    LoadOriginalDll();
-    if (orig_DllRegisterServer) {
-        return orig_DllRegisterServer();
-    }
-    return E_FAIL;
+__declspec(dllexport) HRESULT WINAPI DllRegisterServer(void) {
+    return S_OK;
 }
 
-extern "C" __declspec(dllexport) HRESULT WINAPI DllUnregisterServer() {
-    LoadOriginalDll();
-    if (orig_DllUnregisterServer) {
-        return orig_DllUnregisterServer();
-    }
-    return E_FAIL;
+__declspec(dllexport) HRESULT WINAPI DllUnregisterServer(void) {
+    return S_OK;
 }
 
-extern "C" BOOL WINAPI DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
+__declspec(dllexport) BOOL WINAPI DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
+    if (ul_reason_for_call == DLL_PROCESS_ATTACH) {
+        DisableThreadLibraryCalls(hModule);
+        InitUDP();
+    }
     return TRUE;
+}
+
 }

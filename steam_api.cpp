@@ -32,7 +32,7 @@ void WriteLog(const char* fmt, ...) {
     vsnprintf(buf, sizeof(buf), fmt, args);
     va_end(args);
     
-    FILE* f = fopen("Z:\\Users\\Vedant\\Documents\\ds4_rumble_bridge\\rumble_hook.log", "a");
+    FILE* f = fopen("ds4link_proxy.log", "a");
     if (f) {
         fprintf(f, "%s", buf);
         fclose(f);
@@ -170,31 +170,31 @@ void LoadOriginalSteamApiDll() {
     static bool log_cleared = false;
     if (!log_cleared) {
         log_cleared = true;
-        DeleteFileA("Z:\\Users\\Vedant\\Documents\\ds4_rumble_bridge\\rumble_hook.log");
+        DeleteFileA("ds4link_proxy.log");
     }
     
     if (!hOrigSteamApiDll) {
-        char path[MAX_PATH];
-        if (hMySelf && GetModuleFileNameA(hMySelf, path, MAX_PATH)) {
-            char* lastSlash = strrchr(path, '\\');
+        wchar_t path[MAX_PATH];
+        if (hMySelf && GetModuleFileNameW(hMySelf, path, MAX_PATH)) {
+            wchar_t* lastSlash = wcsrchr(path, L'\\');
             if (!lastSlash) {
-                lastSlash = strrchr(path, '/');
+                lastSlash = wcsrchr(path, L'/');
             }
             if (lastSlash) {
-                strcpy(lastSlash + 1, "steam_api64_original.dll");
-                hOrigSteamApiDll = LoadLibraryA(path);
+                wcscpy(lastSlash + 1, L"steam_api64_original.dll");
+                hOrigSteamApiDll = LoadLibraryW(path);
                 if (hOrigSteamApiDll) {
-                    WriteLog("[SteamAPI DLL] Loaded steam_api64_original.dll from: %s\n", path);
+                    WriteLog("[SteamAPI DLL] Loaded steam_api64_original.dll via Unicode path.\n");
                 } else {
-                    WriteLog("[SteamAPI DLL] Error: Failed to load steam_api64_original.dll from: %s (error %lu)\n", path, GetLastError());
+                    WriteLog("[SteamAPI DLL] Error: Failed to load steam_api64_original.dll via Unicode path (error %lu)\n", GetLastError());
                 }
             }
         }
         
         if (!hOrigSteamApiDll) {
-            hOrigSteamApiDll = LoadLibraryA("steam_api64_original.dll");
+            hOrigSteamApiDll = LoadLibraryW(L"steam_api64_original.dll");
             if (hOrigSteamApiDll) {
-                WriteLog("[SteamAPI DLL] Loaded steam_api64_original.dll (relative)\n");
+                WriteLog("[SteamAPI DLL] Loaded steam_api64_original.dll (relative Unicode)\n");
             } else {
                 WriteLog("[SteamAPI DLL] Fatal: Could not load steam_api64_original.dll (error %lu)\n", GetLastError());
                 return;

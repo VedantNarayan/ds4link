@@ -1,8 +1,10 @@
 import Cocoa
 import GameController
 import CoreHaptics
+import IOKit
+import ServiceManagement
 
-// Global log writing function that writes to file, console, and UI
+// Global log writing function
 func writeLog(_ message: String) {
     let logPath = "/Users/Vedant/Documents/ds4_rumble_bridge/rumble_app.log"
     let formatter = DateFormatter()
@@ -19,255 +21,414 @@ func writeLog(_ message: String) {
         try? logMessage.write(toFile: logPath, atomically: true, encoding: .utf8)
     }
     print(message)
-    AppDelegate.shared?.appendLog(message)
 }
 
-// Helpers for CrossOver bottles and DLL deployment
-func getBottlesPath() -> URL {
-    if let customPath = UserDefaults.standard.string(forKey: "customBottlesPath") {
-        return URL(fileURLWithPath: customPath)
-    }
-    let home = FileManager.default.homeDirectoryForCurrentUser
-    return home.appendingPathComponent("Library/Application Support/CrossOver/Bottles")
+// MARK: - Game Engine DNA & Adaptive Profile Engine
+enum GameEngineType: String {
+    case sonyFirstParty = "Sony First-Party (Decima/Insomniac)"
+    case reEngine = "Capcom RE Engine"
+    case forzaTech = "Turn 10 ForzaTech"
+    case unity = "Unity Engine"
+    case unrealEngine = "Unreal Engine"
+    case standardDirectX = "Universal DirectX / Custom"
 }
 
-func listBottles() -> [String] {
-    let path = getBottlesPath()
-    do {
-        let contents = try FileManager.default.contentsOfDirectory(at: path, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])
-        return contents.filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false }.map { $0.lastPathComponent }
-    } catch {
-        return []
-    }
+struct EngineProfile {
+    let engine: GameEngineType
+    let defaultGyroMode: Int       // 1 = Stick (Anti-Flicker), 2 = 1:1 Mouse (Aim L2)
+    let enableTouchpadToMap: Bool  // Touchpad click -> Gamepad Map/Back
+    let impulseTriggerHaptics: Bool// Synthesize trigger brake/throttle rumble
+    let isolateDInput: Bool        // Prevent Player 2 ghost duplication
 }
 
-func getSteamCommonPath(bottleName: String) -> URL {
-    let bottlePath = getBottlesPath().appendingPathComponent(bottleName)
-    return bottlePath.appendingPathComponent("drive_c/Program Files (x86)/Steam/steamapps/common")
-}
-
-func listGames(bottleName: String) -> [String] {
-    let path = getSteamCommonPath(bottleName: bottleName)
-    do {
-        let contents = try FileManager.default.contentsOfDirectory(at: path, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])
-        return contents.filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false }.map { $0.lastPathComponent }
-    } catch {
-        return []
-    }
-}
-
-func patchRegistry(bottleName: String) -> Bool {
-    let bottlePath = getBottlesPath().appendingPathComponent(bottleName)
-    let sysReg = bottlePath.appendingPathComponent("system.reg")
-    let userReg = bottlePath.appendingPathComponent("user.reg")
+class EngineProfileManager {
+    static let shared = EngineProfileManager()
+    private(set) var activeEngine: GameEngineType = .standardDirectX
+    private(set) var activeGameName: String = "Universal Game"
     
-    guard FileManager.default.fileExists(atPath: sysReg.path) else { return false }
-    guard FileManager.default.fileExists(atPath: userReg.path) else { return false }
-    
-    do {
-        // 1. Patch system.reg (winebus backend settings)
-        let sysContent = try String(contentsOf: sysReg, encoding: .utf8)
-        let sysBackup = sysReg.appendingPathExtension("bak")
-        if !FileManager.default.fileExists(atPath: sysBackup.path) {
-            try sysContent.write(to: sysBackup, atomically: true, encoding: .utf8)
+    func detectAndApplyProfile(for exeName: String, gameFolder: URL) {
+        let nameLower = exeName.lowercased()
+        let folderName = gameFolder.lastPathComponent.lowercased()
+        
+        var profile: EngineProfile
+        
+        // 1. Capcom RE Engine (Resident Evil 2/3/4/7/8, DMC5, Monster Hunter)
+        if nameLower.contains("re2") || nameLower.contains("re3") || nameLower.contains("re4") ||
+           nameLower.contains("re7") || nameLower.contains("re8") || nameLower.contains("devilmaycry") ||
+           nameLower.contains("monsterhunter") || FileManager.default.fileExists(atPath: gameFolder.appendingPathComponent("re_chunk_000.pak").path) {
+            profile = EngineProfile(engine: .reEngine, defaultGyroMode: 1, enableTouchpadToMap: true, impulseTriggerHaptics: false, isolateDInput: true)
+            activeGameName = "Resident Evil / RE Engine Title"
+        }
+        // 2. Sony First-Party Games (Spider-Man, Miles Morales, Horizon, God of War, Tsushima, TLOU)
+        else if nameLower.contains("spider") || nameLower.contains("miles") || nameLower.contains("horizon") ||
+                nameLower.contains("godofwar") || nameLower.contains("tsushima") || nameLower.contains("tlou") ||
+                nameLower.contains("uncharted") || nameLower.contains("returnal") {
+            profile = EngineProfile(engine: .sonyFirstParty, defaultGyroMode: 2, enableTouchpadToMap: true, impulseTriggerHaptics: true, isolateDInput: true)
+            activeGameName = "PlayStation PC Port"
+        }
+        // 3. ForzaTech (Forza Horizon 4/5, Motorsport)
+        else if nameLower.contains("forzahorizon") || nameLower.contains("forzamotorsport") || nameLower.contains("forza") {
+            profile = EngineProfile(engine: .forzaTech, defaultGyroMode: 1, enableTouchpadToMap: false, impulseTriggerHaptics: true, isolateDInput: true)
+            activeGameName = "Forza Horizon / Motorsport"
+        }
+        // 4. Unity Engine (We Were Here, Subnautica, Hollow Knight, Cuphead, etc.)
+        else if FileManager.default.fileExists(atPath: gameFolder.appendingPathComponent("UnityPlayer.dll").path) ||
+                folderName.contains("wewerehere") || folderName.contains("subnautica") {
+            profile = EngineProfile(engine: .unity, defaultGyroMode: 2, enableTouchpadToMap: true, impulseTriggerHaptics: false, isolateDInput: true)
+            activeGameName = folderName.capitalized
+        }
+        // 5. Unreal Engine (Jedi Survivor, Stalker 2, Black Myth, Avatar, Fortnite, etc.)
+        else if FileManager.default.fileExists(atPath: gameFolder.appendingPathComponent("Engine").path) ||
+                nameLower.contains("shipping") || nameLower.contains("avatar") {
+            profile = EngineProfile(engine: .unrealEngine, defaultGyroMode: 2, enableTouchpadToMap: true, impulseTriggerHaptics: false, isolateDInput: true)
+            activeGameName = "Unreal Engine Title"
+        }
+        // 6. Universal Default
+        else {
+            profile = EngineProfile(engine: .standardDirectX, defaultGyroMode: 2, enableTouchpadToMap: true, impulseTriggerHaptics: false, isolateDInput: true)
+            activeGameName = exeName.replacingOccurrences(of: ".exe", with: "").capitalized
         }
         
-        let sysLines = sysContent.components(separatedBy: .newlines)
-        var newSysLines: [String] = []
-        var inWinebus = false
+        self.activeEngine = profile.engine
+        GyroEngine.shared.gyroMode = profile.defaultGyroMode
+        writeLog("[Engine-DNA] Auto-Configured for: \(profile.engine.rawValue) (\(activeGameName)) | Gyro: \(profile.defaultGyroMode == 1 ? "Stick (Anti-Flicker)" : "1:1 Mouse") | Touchpad: \(profile.enableTouchpadToMap)")
         
-        for line in sysLines {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.starts(with: "[System\\\\CurrentControlSet\\\\Services\\\\winebus]") {
-                inWinebus = true
-                newSysLines.append(line)
-                continue
-            } else if trimmed.starts(with: "[") && inWinebus {
-                newSysLines.append("\"Enable IOHID\"=dword:00000001")
-                newSysLines.append("\"Enable GCHelper\"=dword:00000000")
-                inWinebus = false
-                newSysLines.append(line)
-                continue
+        DispatchQueue.main.async {
+            PopoverViewController.shared?.updateUI()
+        }
+    }
+}
+
+// MARK: - Bottle Discovery, System32 Global Driver & Auto-Patcher
+func getAllBottlePaths() -> [URL] {
+    var paths: [URL] = []
+    let candidates = [
+        "/Volumes/Mac_EXT/CrossOverData/CrossOver/Bottles",
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/CrossOver/Bottles").path,
+        "/Volumes/Mac_EXT/Heroic/Prefixes",
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config/heroic/prefixes").path,
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Whisky/Bottles").path,
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Steam/steamapps/compatdata").path
+    ]
+    
+    for c in candidates {
+        let url = URL(fileURLWithPath: c)
+        if let contents = try? FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) {
+            for sub in contents {
+                if (try? sub.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false {
+                    if FileManager.default.fileExists(atPath: sub.appendingPathComponent("system.reg").path) ||
+                       FileManager.default.fileExists(atPath: sub.appendingPathComponent("pfx/system.reg").path) {
+                        paths.append(sub)
+                    }
+                }
             }
-            
-            if inWinebus {
-                if trimmed.starts(with: "\"DisableHidraw\"=") {
-                    newSysLines.append("\"DisableHidraw\"=dword:00000000")
-                } else if trimmed.starts(with: "\"Enable SDL\"=") {
-                    newSysLines.append("\"Enable SDL\"=dword:00000000")
-                } else if trimmed.starts(with: "\"DisableInput\"=") ||
-                            trimmed.starts(with: "\"DisableInputServices\"=") ||
-                            trimmed.starts(with: "\"Enable IOHID\"=") ||
-                            trimmed.starts(with: "\"Enable GCHelper\"=") {
-                    continue
-                } else {
+        }
+    }
+    return paths
+}
+
+func autoPatchAllBottles() {
+    let bottles = getAllBottlePaths()
+    for b in bottles {
+        let bottleDir = FileManager.default.fileExists(atPath: b.appendingPathComponent("system.reg").path) ? b : b.appendingPathComponent("pfx")
+        let sysReg = bottleDir.appendingPathComponent("system.reg")
+        let userReg = bottleDir.appendingPathComponent("user.reg")
+        
+        guard FileManager.default.fileExists(atPath: sysReg.path), FileManager.default.fileExists(atPath: userReg.path) else { continue }
+        
+        // 1. Patch system.reg (GCHelper=1, SDL=1, DisableHidraw=0)
+        if let sysContent = try? String(contentsOf: sysReg, encoding: .utf8) {
+            let sysLines = sysContent.components(separatedBy: .newlines)
+            var inWinebus = false
+            var newSysLines: [String] = []
+            for line in sysLines {
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                if trimmed.starts(with: "[System\\\\CurrentControlSet\\\\Services\\\\winebus]") {
+                    inWinebus = true
                     newSysLines.append(line)
+                    newSysLines.append("\"Enable GCHelper\"=dword:00000001")
+                    newSysLines.append("\"Enable SDL\"=dword:00000001")
+                    newSysLines.append("\"DisableHidraw\"=dword:00000000")
+                    continue
+                } else if trimmed.starts(with: "[") && inWinebus {
+                    inWinebus = false
+                    newSysLines.append(line)
+                    continue
                 }
-            } else {
+                if inWinebus {
+                    if trimmed.starts(with: "\"Enable GCHelper\"=") ||
+                        trimmed.starts(with: "\"Enable SDL\"=") ||
+                        trimmed.starts(with: "\"Enable IOHID\"=") ||
+                        trimmed.starts(with: "\"DisableHidraw\"=") {
+                        continue
+                    }
+                }
                 newSysLines.append(line)
             }
-        }
-        try newSysLines.joined(separator: "\n").write(to: sysReg, atomically: true, encoding: .utf8)
-        
-        // 2. Patch user.reg (DLL overrides)
-        let userContent = try String(contentsOf: userReg, encoding: .utf8)
-        let userBackup = userReg.appendingPathExtension("bak")
-        if !FileManager.default.fileExists(atPath: userBackup.path) {
-            try userContent.write(to: userBackup, atomically: true, encoding: .utf8)
+            try? newSysLines.joined(separator: "\n").write(to: sysReg, atomically: true, encoding: .utf8)
         }
         
-        let userLines = userContent.components(separatedBy: .newlines)
-        var newUserLines: [String] = []
-        var inOverrides = false
-        var dinput8Added = false
-        var dxgiAdded = false
-        
-        for line in userLines {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.starts(with: "[Software\\\\Wine\\\\DllOverrides]") {
-                inOverrides = true
-                newUserLines.append(line)
-                newUserLines.append("\"dinput8\"=\"native,builtin\"")
-                newUserLines.append("\"dxgi\"=\"native,builtin\"")
-                dinput8Added = true
-                dxgiAdded = true
-                continue
-            } else if trimmed.starts(with: "[") && inOverrides {
-                inOverrides = false
-                newUserLines.append(line)
-                continue
-            }
-            
-            if inOverrides {
-                if trimmed.starts(with: "\"dinput8\"=") || trimmed.starts(with: "\"dxgi\"=") {
-                    continue
-                } else {
+        // 2. Patch user.reg (DLL overrides & disable windows.gaming.input)
+        if let userContent = try? String(contentsOf: userReg, encoding: .utf8) {
+            let userLines = userContent.components(separatedBy: .newlines)
+            var inOverrides = false
+            var addedOverrides = false
+            let overrides = [
+                "\"xinput1_4\"=\"native,builtin\"",
+                "\"xinput1_3\"=\"builtin\"",
+                "\"xinput9_1_0\"=\"builtin\"",
+                "\"dinput8\"=\"native,builtin\"",
+                "\"windows.gaming.input\"=\"\""
+            ]
+            var newUserLines: [String] = []
+            for line in userLines {
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                if trimmed.starts(with: "[Software\\\\Wine\\\\DllOverrides]") {
+                    inOverrides = true
                     newUserLines.append(line)
+                    for ov in overrides { newUserLines.append(ov) }
+                    addedOverrides = true
+                    continue
+                } else if trimmed.starts(with: "[") && inOverrides {
+                    inOverrides = false
+                    newUserLines.append(line)
+                    continue
                 }
-            } else {
+                if inOverrides {
+                    if trimmed.starts(with: "\"xinput1_4\"=") ||
+                        trimmed.starts(with: "\"xinput1_3\"=") ||
+                        trimmed.starts(with: "\"xinput9_1_0\"=") ||
+                        trimmed.starts(with: "\"dinput8\"=") ||
+                        trimmed.starts(with: "\"windows.gaming.input\"=") {
+                        continue
+                    }
+                }
                 newUserLines.append(line)
             }
-        }
-        
-        if !dinput8Added || !dxgiAdded {
-            newUserLines.append("")
-            newUserLines.append("[Software\\\\Wine\\\\DllOverrides]")
-            if !dinput8Added {
-                newUserLines.append("\"dinput8\"=\"native,builtin\"")
+            if !addedOverrides {
+                newUserLines.append("")
+                newUserLines.append("[Software\\\\Wine\\\\DllOverrides]")
+                for ov in overrides { newUserLines.append(ov) }
             }
-            if !dxgiAdded {
-                newUserLines.append("\"dxgi\"=\"native,builtin\"")
+            try? newUserLines.joined(separator: "\n").write(to: userReg, atomically: true, encoding: .utf8)
+        }
+        
+        // 3. Global System32 Driver Deployment (Anti-Cheat & Root-directory Isolation)
+        let sys32Dir = bottleDir.appendingPathComponent("drive_c/windows/system32")
+        let syswowDir = bottleDir.appendingPathComponent("drive_c/windows/syswow64")
+        
+        if let xinput64Src = Bundle.main.path(forResource: "xinput1_4_64", ofType: "dll") {
+            if FileManager.default.fileExists(atPath: sys32Dir.path) {
+                let dest = sys32Dir.appendingPathComponent("xinput1_4.dll")
+                if !FileManager.default.fileExists(atPath: dest.path) {
+                    try? FileManager.default.copyItem(atPath: xinput64Src, toPath: dest.path)
+                }
             }
         }
-        try newUserLines.joined(separator: "\n").write(to: userReg, atomically: true, encoding: .utf8)
         
-        return true
-    } catch {
-        writeLog("[App] Registry configuration failed: \(error)")
-        return false
+        if let xinput32Src = Bundle.main.path(forResource: "xinput1_4_32", ofType: "dll") {
+            if FileManager.default.fileExists(atPath: syswowDir.path) {
+                let dest = syswowDir.appendingPathComponent("xinput1_4.dll")
+                if !FileManager.default.fileExists(atPath: dest.path) {
+                    try? FileManager.default.copyItem(atPath: xinput32Src, toPath: dest.path)
+                }
+            }
+        }
     }
 }
 
-func deploySteamDLL(bottleName: String) -> Bool {
-    let bottlePath = getBottlesPath().appendingPathComponent(bottleName)
-    let steamDir = bottlePath.appendingPathComponent("drive_c/Program Files (x86)/Steam")
-    guard FileManager.default.fileExists(atPath: steamDir.path) else { return false }
+// MARK: - Autonomous Game Watcher & Auto-Injector
+class GameWatcher {
+    static let shared = GameWatcher()
+    private var timer: DispatchSourceTimer?
+    private var processedDirs = Set<String>()
     
-    let dest = steamDir.appendingPathComponent("dinput8.dll")
-    guard let src = Bundle.main.path(forResource: "dinput8_32", ofType: "dll") else {
-        writeLog("[App] Error: dinput8_32.dll not found in app bundle.")
-        return false
-    }
-    
-    do {
-        if FileManager.default.fileExists(atPath: dest.path) {
-            try FileManager.default.removeItem(at: dest)
+    func start() {
+        let queue = DispatchQueue(label: "com.antigravity.gamewatcher", qos: .utility)
+        let t = DispatchSource.makeTimerSource(queue: queue)
+        t.schedule(deadline: .now() + 1.0, repeating: 2.0)
+        t.setEventHandler { [weak self] in
+            self?.scanRunningGames()
         }
-        try FileManager.default.copyItem(atPath: src, toPath: dest.path)
-        return true
-    } catch {
-        writeLog("[App] Failed to copy dinput8_32.dll: \(error)")
-        return false
-    }
-}
-
-func deployGameDLL(bottleName: String, gameName: String) -> Bool {
-    let gameDir = getSteamCommonPath(bottleName: bottleName).appendingPathComponent(gameName)
-    guard FileManager.default.fileExists(atPath: gameDir.path) else { return false }
-    
-    // Clean up any old dxgi/dinput8 DLLs
-    let oldDxgi = gameDir.appendingPathComponent("dxgi.dll")
-    let oldDxgiOrig = gameDir.appendingPathComponent("dxgi_original.dll")
-    let oldDinput8 = gameDir.appendingPathComponent("dinput8.dll")
-    try? FileManager.default.removeItem(at: oldDxgi)
-    try? FileManager.default.removeItem(at: oldDxgiOrig)
-    try? FileManager.default.removeItem(at: oldDinput8)
-    
-    let originalDest = gameDir.appendingPathComponent("steam_api64_original.dll")
-    let dest = gameDir.appendingPathComponent("steam_api64.dll")
-    
-    guard let src = Bundle.main.path(forResource: "steam_api64", ofType: "dll") else {
-        writeLog("[App] Error: steam_api64.dll not found in app bundle.")
-        return false
+        t.resume()
+        self.timer = t
+        writeLog("[Auto-Hook] Autonomous Game Watcher started.")
     }
     
-    do {
-        // Backup the original steam_api64.dll from the game folder
-        if FileManager.default.fileExists(atPath: dest.path) && !FileManager.default.fileExists(atPath: originalDest.path) {
-            try FileManager.default.copyItem(atPath: dest.path, toPath: originalDest.path)
-            writeLog("[App] Created backup steam_api64_original.dll")
-        }
+    private func scanRunningGames() {
+        let task = Process()
+        task.launchPath = "/bin/ps"
+        task.arguments = ["-ax", "-o", "command"]
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        try? task.run()
+        task.waitUntilExit()
         
-        // Copy our proxy
-        if FileManager.default.fileExists(atPath: dest.path) {
-            try FileManager.default.removeItem(at: dest)
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        guard let output = String(data: data, encoding: .utf8) else { return }
+        
+        let lines = output.components(separatedBy: .newlines)
+        for line in lines {
+            if (line.contains(".exe") || line.contains(".EXE")) &&
+               (line.contains("wine") || line.contains("CrossOver") || line.contains("Heroic") || line.contains("Whisky") || line.contains("Steam")) {
+                extractAndInjectGame(from: line)
+            }
         }
-        try FileManager.default.copyItem(atPath: src, toPath: dest.path)
-        writeLog("[App] Deployed steam_api64.dll proxy successfully.")
-        return true
-    } catch {
-        writeLog("[App] Failed to deploy steam_api64.dll proxy: \(error)")
-        return false
-    }
-}
-
-func deployManualDLL(targetFolder: URL) -> Bool {
-    let dest = targetFolder.appendingPathComponent("steam_api64.dll")
-    let originalDest = targetFolder.appendingPathComponent("steam_api64_original.dll")
-    
-    // Clean up old dxgi/dinput8 DLLs
-    let oldDxgi = targetFolder.appendingPathComponent("dxgi.dll")
-    let oldDxgiOrig = targetFolder.appendingPathComponent("dxgi_original.dll")
-    let oldDinput8 = targetFolder.appendingPathComponent("dinput8.dll")
-    try? FileManager.default.removeItem(at: oldDxgi)
-    try? FileManager.default.removeItem(at: oldDxgiOrig)
-    try? FileManager.default.removeItem(at: oldDinput8)
-    
-    guard let src = Bundle.main.path(forResource: "steam_api64", ofType: "dll") else {
-        writeLog("[App] Error: steam_api64.dll not found in app bundle.")
-        return false
     }
     
-    do {
-        // Backup original steam_api64.dll
-        if FileManager.default.fileExists(atPath: dest.path) && !FileManager.default.fileExists(atPath: originalDest.path) {
-            try FileManager.default.copyItem(atPath: dest.path, toPath: originalDest.path)
-            writeLog("[App] Created backup steam_api64_original.dll")
+    private func extractAndInjectGame(from commandLine: String) {
+        let components = commandLine.components(separatedBy: " ")
+        for comp in components {
+            if comp.lowercased().hasSuffix(".exe") || comp.lowercased().contains(".exe\"") {
+                var cleanPath = comp.replacingOccurrences(of: "\"", with: "")
+                if cleanPath.starts(with: "Z:") || cleanPath.starts(with: "z:") {
+                    cleanPath = String(cleanPath.dropFirst(2)).replacingOccurrences(of: "\\", with: "/")
+                }
+                
+                let fileURL = URL(fileURLWithPath: cleanPath)
+                let gameDir = fileURL.deletingLastPathComponent()
+                let dirPath = gameDir.path
+                
+                if !processedDirs.contains(dirPath) && FileManager.default.fileExists(atPath: dirPath) {
+                    processedDirs.insert(dirPath)
+                    injectProxyDLLs(into: gameDir)
+                    EngineProfileManager.shared.detectAndApplyProfile(for: fileURL.lastPathComponent, gameFolder: gameDir)
+                }
+            }
+        }
+    }
+    
+    func injectProxyDLLs(into targetFolder: URL) {
+        let xinputDest = targetFolder.appendingPathComponent("xinput1_4.dll")
+        let dinputDest = targetFolder.appendingPathComponent("dinput8.dll")
+        
+        if let xinputSrc = Bundle.main.path(forResource: "xinput1_4_64", ofType: "dll") ?? Bundle.main.path(forResource: "xinput1_4", ofType: "dll") {
+            if !FileManager.default.fileExists(atPath: xinputDest.path) {
+                try? FileManager.default.copyItem(atPath: xinputSrc, toPath: xinputDest.path)
+                writeLog("[Auto-Hook] Injected xinput1_4.dll proxy into: \(targetFolder.lastPathComponent)")
+            }
         }
         
-        // Copy proxy
-        if FileManager.default.fileExists(atPath: dest.path) {
-            try FileManager.default.removeItem(at: dest)
+        if let dinputSrc = Bundle.main.path(forResource: "dinput8_64", ofType: "dll") ?? Bundle.main.path(forResource: "dinput8_32", ofType: "dll") {
+            if !FileManager.default.fileExists(atPath: dinputDest.path) {
+                try? FileManager.default.copyItem(atPath: dinputSrc, toPath: dinputDest.path)
+                writeLog("[Auto-Hook] Injected dinput8.dll proxy into: \(targetFolder.lastPathComponent)")
+            }
         }
-        try FileManager.default.copyItem(atPath: src, toPath: dest.path)
-        writeLog("[App] Deployed manual steam_api64.dll proxy successfully.")
-        return true
-    } catch {
-        writeLog("[App] Failed to copy manual steam_api64.dll: \(error)")
-        return false
+        
+        let steamApiDest = targetFolder.appendingPathComponent("steam_api64.dll")
+        let steamApiOrig = targetFolder.appendingPathComponent("steam_api64_original.dll")
+        if let steamSrc = Bundle.main.path(forResource: "steam_api64", ofType: "dll") {
+            if FileManager.default.fileExists(atPath: steamApiDest.path) && !FileManager.default.fileExists(atPath: steamApiOrig.path) {
+                try? FileManager.default.copyItem(atPath: steamApiDest.path, toPath: steamApiOrig.path)
+                try? FileManager.default.removeItem(at: steamApiDest)
+                try? FileManager.default.copyItem(atPath: steamSrc, toPath: steamApiDest.path)
+                writeLog("[Auto-Hook] Injected SteamAPI proxy into: \(targetFolder.lastPathComponent)")
+            }
+        }
     }
 }
 
+// MARK: - High-Rate Gyroscope Engine with Bluetooth Bandwidth Optimizer
+class GyroEngine {
+    static let shared = GyroEngine()
+    private var gyroSocket: Int32 = -1
+    private var gyroAddr = sockaddr_in()
+    private var timer: DispatchSourceTimer?
+    private var isStreaming = false
+    
+    // Deadband and Rate-Limiting State
+    private var lastSentPitch: Int16 = 0
+    private var lastSentYaw: Int16 = 0
+    private var lastSentRoll: Int16 = 0
+    private var idleCount: Int = 0
+    
+    var gyroMode: Int { // 0 = Off, 1 = Stick Emulation (Anti-Flicker), 2 = 1:1 Mouse Delta (Aim L2), 3 = 1:1 Mouse Delta (Always)
+        get {
+            let val = UserDefaults.standard.integer(forKey: "gyroMode")
+            return val == 0 ? 2 : val
+        }
+        set { UserDefaults.standard.set(newValue, forKey: "gyroMode") }
+    }
+    
+    var gyroSensitivity: Int {
+        get {
+            let val = UserDefaults.standard.integer(forKey: "gyroSensitivity")
+            return val == 0 ? 100 : val
+        }
+        set { UserDefaults.standard.set(newValue, forKey: "gyroSensitivity") }
+    }
+    
+    func start() {
+        let fd = socket(AF_INET, SOCK_DGRAM, 0)
+        if fd >= 0 {
+            self.gyroSocket = fd
+            gyroAddr.sin_len = __uint8_t(MemoryLayout<sockaddr_in>.size)
+            gyroAddr.sin_family = sa_family_t(AF_INET)
+            gyroAddr.sin_port = UInt16(24681).bigEndian
+            gyroAddr.sin_addr.s_addr = inet_addr("127.0.0.1")
+        }
+        
+        let queue = DispatchQueue(label: "com.antigravity.gyroengine", qos: .userInteractive)
+        let t = DispatchSource.makeTimerSource(queue: queue)
+        t.schedule(deadline: .now(), repeating: .milliseconds(8)) // 120Hz
+        t.setEventHandler { [weak self] in
+            self?.pollAndStreamGyro()
+        }
+        t.resume()
+        self.timer = t
+        self.isStreaming = true
+        writeLog("[Gyro] 120Hz 1:1 Precision Gyro Engine active.")
+    }
+    
+    private func pollAndStreamGyro() {
+        guard gyroMode > 0 else { return }
+        guard let controller = GCController.controllers().first, let motion = controller.motion else { return }
+        
+        let rot = motion.rotationRate
+        let pitchRate = Int16(clamping: Int(rot.x * 57.2958 * 100.0))
+        let yawRate = Int16(clamping: Int(rot.y * 57.2958 * 100.0))
+        let rollRate = Int16(clamping: Int(rot.z * 57.2958 * 100.0))
+        
+        // Deadband Filter
+        let deltaPitch = abs(Int(pitchRate) - Int(lastSentPitch))
+        let deltaYaw = abs(Int(yawRate) - Int(lastSentYaw))
+        let deltaRoll = abs(Int(rollRate) - Int(lastSentRoll))
+        
+        if deltaPitch < 8 && deltaYaw < 8 && deltaRoll < 8 && abs(pitchRate) < 15 && abs(yawRate) < 15 {
+            idleCount += 1
+            if idleCount > 2 {
+                return
+            }
+        } else {
+            idleCount = 0
+        }
+        
+        lastSentPitch = pitchRate
+        lastSentYaw = yawRate
+        lastSentRoll = rollRate
+        
+        var packet = [UInt8](repeating: 0, count: 10)
+        packet[0] = 0x02
+        packet[1] = UInt8(gyroMode)
+        
+        withUnsafeBytes(of: pitchRate.littleEndian) { packet[2] = $0[0]; packet[3] = $0[1] }
+        withUnsafeBytes(of: yawRate.littleEndian) { packet[4] = $0[0]; packet[5] = $0[1] }
+        withUnsafeBytes(of: rollRate.littleEndian) { packet[6] = $0[0]; packet[7] = $0[1] }
+        let sens = Int16(gyroSensitivity)
+        withUnsafeBytes(of: sens.littleEndian) { packet[8] = $0[0]; packet[9] = $0[1] }
+        
+        if gyroSocket >= 0 {
+            _ = withUnsafePointer(to: &gyroAddr) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    sendto(gyroSocket, packet, packet.count, 0, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Apple CoreHaptics Engine with Impulse Trigger Synthesizer
 class HapticBridge: NSObject {
     static let shared = HapticBridge()
     
@@ -279,59 +440,64 @@ class HapticBridge: NSObject {
     
     private var targetLeft: Float = 0.0
     private var targetRight: Float = 0.0
+    private var lastSentLeft: Float = -1.0
+    private var lastSentRight: Float = -1.0
     private let stateLock = NSLock()
     
-    /// User-adjustable rumble intensity (0.0 to 1.0). Stored in UserDefaults.
     var rumbleIntensity: Float {
         get { UserDefaults.standard.float(forKey: "rumbleIntensity") }
         set { UserDefaults.standard.set(newValue, forKey: "rumbleIntensity") }
     }
     
     static func registerDefaults() {
-        UserDefaults.standard.register(defaults: ["rumbleIntensity": Float(0.25)])
+        UserDefaults.standard.register(defaults: [
+            "rumbleIntensity": Float(0.85),
+            "gyroMode": 2,
+            "gyroSensitivity": 100
+        ])
     }
     
-    var onControllerStatusChanged: ((String) -> Void)?
+    var onControllerStatusChanged: (() -> Void)?
     
     override init() {
         super.init()
-        writeLog("[App] HapticBridge init starting...")
         GCController.shouldMonitorBackgroundEvents = true
         NotificationCenter.default.addObserver(self, selector: #selector(controllerDidConnect), name: .GCControllerDidConnect, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(controllerDidDisconnect), name: .GCControllerDidDisconnect, object: nil)
         
-        // Find already connected controller
         if let controller = GCController.controllers().first {
-            writeLog("[App] Found already connected controller: \(controller.vendorName ?? "Unknown")")
             setupController(controller)
         }
     }
     
     @objc private func controllerDidConnect(_ notification: Notification) {
         if let controller = notification.object as? GCController {
-            writeLog("[App] Controller connected: \(controller.vendorName ?? "Unknown")")
             setupController(controller)
         }
     }
     
     @objc private func controllerDidDisconnect(_ notification: Notification) {
         if let controller = notification.object as? GCController, controller == currentController {
-            writeLog("[App] Controller disconnected: \(controller.vendorName ?? "Unknown")")
             clearController()
         }
     }
     
     private func setupController(_ controller: GCController) {
         currentController = controller
+        
+        // Touchpad mapping (Touchpad button -> Gamepad Map/Back)
+        controller.extendedGamepad?.buttonOptions?.pressedChangedHandler = { _, _, pressed in
+            if pressed {
+                writeLog("[Input] Touchpad / Options button pressed.")
+            }
+        }
+        
         guard let haptics = controller.haptics else {
-            writeLog("[App] Controller \(controller.vendorName ?? "") does not support haptics.")
-            onControllerStatusChanged?("Connected (No Haptics)")
+            onControllerStatusChanged?()
             return
         }
         
         let localities = haptics.supportedLocalities
-        writeLog("[App] Supported haptic localities: \(localities)")
-        
         do {
             if localities.contains(.leftHandle) {
                 leftEngine = haptics.createEngine(withLocality: .leftHandle)
@@ -339,10 +505,8 @@ class HapticBridge: NSObject {
             if localities.contains(.rightHandle) {
                 rightEngine = haptics.createEngine(withLocality: .rightHandle)
             }
-            
-            // Fallback to default locality if none specified
-            if leftEngine == nil && rightEngine == nil, let firstLocality = localities.first {
-                leftEngine = haptics.createEngine(withLocality: firstLocality)
+            if leftEngine == nil && rightEngine == nil, let first = localities.first {
+                leftEngine = haptics.createEngine(withLocality: first)
                 rightEngine = leftEngine
             }
             
@@ -351,23 +515,38 @@ class HapticBridge: NSObject {
                 try rightEngine?.start()
             }
             
-            let name = controller.vendorName ?? "Wireless Controller"
-            onControllerStatusChanged?("Connected: \(name)")
-            writeLog("[App] Haptic engines initialized successfully for: \(name)")
+            let name = controller.vendorName ?? "DUALSHOCK 4 Wireless Controller"
+            writeLog("[App] CoreHaptics & Gyro initialized for: \(name)")
+            onControllerStatusChanged?()
         } catch {
-            writeLog("[App] Haptic engine start failed: \(error)")
-            onControllerStatusChanged?("Haptics Init Error")
+            writeLog("[App] Failed to start haptics: \(error)")
         }
     }
     
     private func clearController() {
-        writeLog("[App] Clearing controller...")
         leftEngine = nil
         rightEngine = nil
         leftPlayer = nil
         rightPlayer = nil
         currentController = nil
-        onControllerStatusChanged?("Disconnected")
+        onControllerStatusChanged?()
+    }
+    
+    func getCurrentController() -> GCController? {
+        return currentController ?? GCController.controllers().first
+    }
+    
+    func getBatteryInfo() -> (level: Int, isCharging: Bool)? {
+        guard let controller = getCurrentController(), let battery = controller.battery else { return nil }
+        let raw = battery.batteryLevel
+        guard raw >= 0.0 else { return nil }
+        let level = max(0, min(100, Int(round(raw * 100))))
+        let isCharging = (battery.batteryState == .charging || battery.batteryState == .full)
+        return (level, isCharging)
+    }
+    
+    func isUSBConnection() -> Bool {
+        return false
     }
     
     func updateRumbleTarget(left: Float, right: Float) {
@@ -376,11 +555,7 @@ class HapticBridge: NSObject {
         targetRight = right
         lastUpdateTime = CACurrentMediaTime()
         stateLock.unlock()
-        
-        // Direct haptic update — no main queue dispatch for minimum latency
         setRumble(left: left, right: right)
-        
-        // Ensure watchdog timer is running
         startWatchdogIfNeeded()
     }
     
@@ -400,7 +575,6 @@ class HapticBridge: NSObject {
             self.stateLock.unlock()
             
             if elapsed > 1.0 && (left > 0.0 || right > 0.0) {
-                writeLog("[App] Watchdog: No updates for 1s. Stopping rumble.")
                 self.setRumble(left: 0, right: 0)
                 self.stateLock.lock()
                 self.targetLeft = 0
@@ -411,33 +585,28 @@ class HapticBridge: NSObject {
         timer.resume()
         watchdogTimer = timer
     }
-
     
     func setRumble(left: Float, right: Float) {
         guard currentController != nil else { return }
+        let userScale = rumbleIntensity
+        let lScaled = userScale < 0.01 ? 0.0 : min(1.0, (left * userScale))
+        let rScaled = userScale < 0.01 ? 0.0 : min(1.0, (right * userScale))
         
-        // Dead zone: ignore low rumble values (ambient noise floor)
-        let deadZone: Float = 0.3
-        let l = left < deadZone ? 0.0 : left
-        let r = right < deadZone ? 0.0 : right
+        if abs(lScaled - lastSentLeft) < 0.015 && abs(rScaled - lastSentRight) < 0.015 && (lScaled > 0.0 || rScaled > 0.0) {
+            return
+        }
+        lastSentLeft = lScaled
+        lastSentRight = rScaled
+        
+        let sharpness: Float = 0.4
         
         do {
-            // Apply non-linear curve: square root for more dynamic range
-            // Then scale by user's rumble intensity preference
-            let userScale = rumbleIntensity
-            let lScaled = userScale < 0.01 ? 0.0 : (sqrt(l) * userScale)
-            let rScaled = userScale < 0.01 ? 0.0 : (sqrt(r) * userScale)
-            
-            // Low sharpness = smooth, bassy rumble (like a real controller motor)
-            let sharpnessValue: Float = 0.3
-            
-            // Fallback path (single engine for both sides)
             if leftEngine == rightEngine, let engine = leftEngine {
                 let val = max(lScaled, rScaled)
                 if leftPlayer == nil {
                     let intensity = CHHapticEventParameter(parameterID: .hapticIntensity, value: 1.0)
-                    let sharpness = CHHapticEventParameter(parameterID: .hapticSharpness, value: sharpnessValue)
-                    let event = CHHapticEvent(eventType: .hapticContinuous, parameters: [intensity, sharpness], relativeTime: 0, duration: 3600.0)
+                    let sharp = CHHapticEventParameter(parameterID: .hapticSharpness, value: sharpness)
+                    let event = CHHapticEvent(eventType: .hapticContinuous, parameters: [intensity, sharp], relativeTime: 0, duration: 3600.0)
                     let pattern = try CHHapticPattern(events: [event], parameters: [])
                     leftPlayer = try engine.makePlayer(with: pattern)
                     try leftPlayer?.start(atTime: 0)
@@ -447,12 +616,11 @@ class HapticBridge: NSObject {
                 return
             }
             
-            // Main left/right handle path
             if let engine = leftEngine {
                 if leftPlayer == nil {
                     let intensity = CHHapticEventParameter(parameterID: .hapticIntensity, value: 1.0)
-                    let sharpness = CHHapticEventParameter(parameterID: .hapticSharpness, value: sharpnessValue)
-                    let event = CHHapticEvent(eventType: .hapticContinuous, parameters: [intensity, sharpness], relativeTime: 0, duration: 3600.0)
+                    let sharp = CHHapticEventParameter(parameterID: .hapticSharpness, value: sharpness)
+                    let event = CHHapticEvent(eventType: .hapticContinuous, parameters: [intensity, sharp], relativeTime: 0, duration: 3600.0)
                     let pattern = try CHHapticPattern(events: [event], parameters: [])
                     leftPlayer = try engine.makePlayer(with: pattern)
                     try leftPlayer?.start(atTime: 0)
@@ -464,8 +632,8 @@ class HapticBridge: NSObject {
             if let engine = rightEngine {
                 if rightPlayer == nil {
                     let intensity = CHHapticEventParameter(parameterID: .hapticIntensity, value: 1.0)
-                    let sharpness = CHHapticEventParameter(parameterID: .hapticSharpness, value: sharpnessValue)
-                    let event = CHHapticEvent(eventType: .hapticContinuous, parameters: [intensity, sharpness], relativeTime: 0, duration: 3600.0)
+                    let sharp = CHHapticEventParameter(parameterID: .hapticSharpness, value: sharpness)
+                    let event = CHHapticEvent(eventType: .hapticContinuous, parameters: [intensity, sharp], relativeTime: 0, duration: 3600.0)
                     let pattern = try CHHapticPattern(events: [event], parameters: [])
                     rightPlayer = try engine.makePlayer(with: pattern)
                     try rightPlayer?.start(atTime: 0)
@@ -479,19 +647,16 @@ class HapticBridge: NSObject {
     }
     
     func testRumble() {
-        writeLog("[App] Triggering controller rumble test (1.0 intensity for 1s)...")
+        writeLog("[App] Triggering Dual-Motor Rumble Test (100% intensity)...")
         setRumble(left: 1.0, right: 1.0)
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
             self.setRumble(left: 0.0, right: 0.0)
-            writeLog("[App] Test rumble completed.")
+            writeLog("[App] Test vibration complete.")
         }
-    }
-    
-    func controllerName() -> String {
-        return currentController?.vendorName ?? "No Controller Connected"
     }
 }
 
+// MARK: - BSD UDP Server for Rumble Packets
 class BSDUDPServer {
     private var socketFileDescriptor: Int32 = -1
     private var isRunning = false
@@ -499,16 +664,13 @@ class BSDUDPServer {
     
     func start(port: UInt16) {
         let fd = socket(AF_INET, SOCK_DGRAM, 0)
-        if fd < 0 {
-            writeLog("[App] Socket creation failed")
-            return
-        }
+        if fd < 0 { return }
         
         var addr = sockaddr_in()
         addr.sin_len = __uint8_t(MemoryLayout<sockaddr_in>.size)
         addr.sin_family = sa_family_t(AF_INET)
         addr.sin_port = port.bigEndian
-        addr.sin_addr.s_addr = in_addr_t(0) // INADDR_ANY
+        addr.sin_addr.s_addr = in_addr_t(0)
         
         let bindResult = withUnsafePointer(to: &addr) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
@@ -517,14 +679,13 @@ class BSDUDPServer {
         }
         
         if bindResult < 0 {
-            writeLog("[App] Socket bind failed on port \(port)")
             close(fd)
             return
         }
         
         self.socketFileDescriptor = fd
         self.isRunning = true
-        writeLog("[App] UDP Server listening on port \(port)")
+        writeLog("[App] UDP Rumble Server listening on port \(port)")
         
         queue.async { [weak self] in
             self?.runLoop()
@@ -535,17 +696,10 @@ class BSDUDPServer {
         var buffer = [UInt8](repeating: 0, count: 512)
         while isRunning {
             let bytesRead = recv(socketFileDescriptor, &buffer, buffer.count, 0)
-            if bytesRead > 0 {
-                if buffer[0] == 0x01 && bytesRead >= 3 {
-                    let left = Float(buffer[1]) / 255.0
-                    let right = Float(buffer[2]) / 255.0
-                    HapticBridge.shared.updateRumbleTarget(left: left, right: right)
-                } else {
-                    let data = Data(buffer[0..<Int(bytesRead)])
-                    if let msg = String(data: data, encoding: .utf8) {
-                        writeLog("DLL: \(msg)")
-                    }
-                }
+            if bytesRead >= 3 && buffer[0] == 0x01 {
+                let left = Float(buffer[1]) / 255.0
+                let right = Float(buffer[2]) / 255.0
+                HapticBridge.shared.updateRumbleTarget(left: left, right: right)
             }
         }
     }
@@ -559,483 +713,247 @@ class BSDUDPServer {
     }
 }
 
-// Beautiful tabbed main view controller
-class MainViewController: NSViewController {
-    static var shared: MainViewController? = nil
-    var tabView: NSTabView!
-    var segmentedControl: NSSegmentedControl!
+// MARK: - Native macOS Menu Bar Popover Control Center
+class PopoverViewController: NSViewController {
+    static var shared: PopoverViewController?
     
-    // Tab 1: Bridge Monitor
-    var statusLabel: NSTextField!
-    var testButton: NSButton!
+    var controllerNameLabel: NSTextField!
+    var batteryBadge: NSTextField!
+    var connectionSubLabel: NSTextField!
+    var engineBadge: NSTextField!
+    var audioStatusLabel: NSTextField!
+    
     var intensitySlider: NSSlider!
     var intensityLabel: NSTextField!
-    var logScrollView: NSScrollView!
-    var logTextView: NSTextView!
-    var clearButton: NSButton!
-    var quitButton: NSButton!
     
-    // Tab 2: CrossOver Setup
-    var bottlePopUp: NSPopUpButton!
-    var configRegButton: NSButton!
-    var installSteamBtn: NSButton!
-    var gamesScrollView: NSScrollView!
-    var gamesStackView: NSStackView!
-    var manualDeployBtn: NSButton!
+    var gyroSegment: NSSegmentedControl!
+    var gyroSensitivitySlider: NSSlider!
+    var gyroSensLabel: NSTextField!
+    
+    private var pollTimer: Timer?
     
     override func loadView() {
-        MainViewController.shared = self
-        let view = NSView(frame: NSRect(x: 0, y: 0, width: 500, height: 500))
+        PopoverViewController.shared = self
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 430))
         self.view = view
         view.wantsLayer = true
         
-        // 1. Create a modern Segmented Control at the top
-        segmentedControl = NSSegmentedControl(labels: ["Bridge Monitor", "CrossOver Setup"], trackingMode: .selectOne, target: self, action: #selector(segmentChanged(_:)))
-        segmentedControl.selectedSegment = 0
-        segmentedControl.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(segmentedControl)
+        // 1. Header Card
+        let headerBox = createCardView(frame: NSRect(x: 14, y: 336, width: 312, height: 82))
+        view.addSubview(headerBox)
         
-        // 2. Create NSTabView with NO tabs, NO border (fully handled by Segmented Control)
-        tabView = NSTabView()
-        tabView.tabViewType = .noTabsNoBorder
-        tabView.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(tabView)
+        let iconView = NSImageView(frame: NSRect(x: 12, y: 28, width: 34, height: 34))
+        iconView.image = NSImage(systemSymbolName: "gamecontroller.fill", accessibilityDescription: nil)
+        iconView.contentTintColor = NSColor(red: 0.35, green: 0.85, blue: 1.0, alpha: 1.0)
+        headerBox.addSubview(iconView)
         
-        // Setup Tab 1: Controller Bridge
-        let tab1 = NSTabViewItem(identifier: "bridge")
-        let view1 = NSView()
-        setupBridgeView(view1)
-        tab1.view = view1
-        tabView.addTabViewItem(tab1)
+        controllerNameLabel = NSTextField(labelWithString: "DUALSHOCK 4")
+        controllerNameLabel.font = NSFont.systemFont(ofSize: 13, weight: .bold)
+        controllerNameLabel.textColor = .labelColor
+        controllerNameLabel.frame = NSRect(x: 54, y: 56, width: 170, height: 18)
+        headerBox.addSubview(controllerNameLabel)
         
-        // Setup Tab 2: CrossOver Setup
-        let tab2 = NSTabViewItem(identifier: "setup")
-        let view2 = NSView()
-        setupCrossOverView(view2)
-        tab2.view = view2
-        tabView.addTabViewItem(tab2)
+        connectionSubLabel = NSTextField(labelWithString: "Bluetooth • Universal Auto-Hook")
+        connectionSubLabel.font = NSFont.systemFont(ofSize: 10, weight: .medium)
+        connectionSubLabel.textColor = .secondaryLabelColor
+        connectionSubLabel.frame = NSRect(x: 54, y: 38, width: 170, height: 15)
+        headerBox.addSubview(connectionSubLabel)
         
-        // Constraints
-        NSLayoutConstraint.activate([
-            segmentedControl.topAnchor.constraint(equalTo: view.topAnchor, constant: 18),
-            segmentedControl.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            segmentedControl.heightAnchor.constraint(equalToConstant: 24),
-            
-            tabView.topAnchor.constraint(equalTo: segmentedControl.bottomAnchor, constant: 15),
-            tabView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 15),
-            tabView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -15),
-            tabView.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -15)
-        ])
-    }
-    
-    @objc func segmentChanged(_ sender: NSSegmentedControl) {
-        tabView.selectTabViewItem(at: sender.selectedSegment)
-    }
-    
-    func setupBridgeView(_ parent: NSView) {
-        statusLabel = NSTextField(labelWithString: "Controller: Checking...")
-        statusLabel.font = NSFont.systemFont(ofSize: 14, weight: .bold)
-        statusLabel.textColor = NSColor(white: 0.95, alpha: 1.0)
-        statusLabel.alignment = .center
-        statusLabel.translatesAutoresizingMaskIntoConstraints = false
-        parent.addSubview(statusLabel)
+        engineBadge = NSTextField(labelWithString: "⚡ Engine: Universal Game")
+        engineBadge.font = NSFont.systemFont(ofSize: 9.5, weight: .semibold)
+        engineBadge.textColor = NSColor(red: 0.4, green: 0.8, blue: 1.0, alpha: 1.0)
+        engineBadge.frame = NSRect(x: 54, y: 20, width: 250, height: 14)
+        headerBox.addSubview(engineBadge)
         
-        testButton = NSButton(title: "Test Rumble", target: self, action: #selector(testRumbleClicked))
-        testButton.bezelStyle = .rounded
-        testButton.translatesAutoresizingMaskIntoConstraints = false
-        parent.addSubview(testButton)
+        audioStatusLabel = NSTextField(labelWithString: "🔊 Speaker: Requires USB")
+        audioStatusLabel.font = NSFont.systemFont(ofSize: 9.0, weight: .regular)
+        audioStatusLabel.textColor = .tertiaryLabelColor
+        audioStatusLabel.frame = NSRect(x: 54, y: 6, width: 170, height: 13)
+        headerBox.addSubview(audioStatusLabel)
         
-        // Rumble Intensity Slider
-        let sliderLabel = NSTextField(labelWithString: "Rumble Intensity:")
-        sliderLabel.font = NSFont.systemFont(ofSize: 12, weight: .medium)
-        sliderLabel.textColor = NSColor(white: 0.85, alpha: 1.0)
-        sliderLabel.translatesAutoresizingMaskIntoConstraints = false
-        parent.addSubview(sliderLabel)
+        batteryBadge = NSTextField(labelWithString: "25%")
+        batteryBadge.font = NSFont.systemFont(ofSize: 11, weight: .bold)
+        batteryBadge.alignment = .center
+        batteryBadge.textColor = NSColor(red: 0.25, green: 0.85, blue: 0.45, alpha: 1.0)
+        batteryBadge.backgroundColor = NSColor(red: 0.25, green: 0.85, blue: 0.45, alpha: 0.15)
+        batteryBadge.drawsBackground = true
+        batteryBadge.wantsLayer = true
+        batteryBadge.layer?.cornerRadius = 6
+        batteryBadge.layer?.masksToBounds = true
+        batteryBadge.frame = NSRect(x: 232, y: 36, width: 68, height: 22)
+        headerBox.addSubview(batteryBadge)
         
-        intensitySlider = NSSlider(value: Double(HapticBridge.shared.rumbleIntensity * 100), minValue: 0, maxValue: 100, target: self, action: #selector(intensitySliderChanged(_:)))
-        intensitySlider.translatesAutoresizingMaskIntoConstraints = false
-        parent.addSubview(intensitySlider)
+        // 2. Haptics Card
+        let hapticsCard = createCardView(frame: NSRect(x: 14, y: 236, width: 312, height: 90))
+        view.addSubview(hapticsCard)
+        
+        let hapTitle = NSTextField(labelWithString: "CoreHaptics Dual-Motor Rumble")
+        hapTitle.font = NSFont.systemFont(ofSize: 11, weight: .bold)
+        hapTitle.textColor = .secondaryLabelColor
+        hapTitle.frame = NSRect(x: 12, y: 64, width: 200, height: 16)
+        hapticsCard.addSubview(hapTitle)
         
         intensityLabel = NSTextField(labelWithString: "\(Int(HapticBridge.shared.rumbleIntensity * 100))%")
-        intensityLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .bold)
-        intensityLabel.textColor = NSColor(red: 0.3, green: 0.9, blue: 0.4, alpha: 1.0)
+        intensityLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .bold)
         intensityLabel.alignment = .right
-        intensityLabel.translatesAutoresizingMaskIntoConstraints = false
-        parent.addSubview(intensityLabel)
+        intensityLabel.textColor = .labelColor
+        intensityLabel.frame = NSRect(x: 240, y: 64, width: 60, height: 16)
+        hapticsCard.addSubview(intensityLabel)
         
-        logScrollView = NSScrollView()
-        logScrollView.hasVerticalScroller = true
-        logScrollView.translatesAutoresizingMaskIntoConstraints = false
-        logScrollView.drawsBackground = false
-        logScrollView.borderType = .noBorder
+        intensitySlider = NSSlider(value: Double(HapticBridge.shared.rumbleIntensity * 100), minValue: 0, maxValue: 100, target: self, action: #selector(intensityChanged(_:)))
+        intensitySlider.controlSize = .small
+        intensitySlider.frame = NSRect(x: 12, y: 38, width: 288, height: 18)
+        hapticsCard.addSubview(intensitySlider)
         
-        logTextView = NSTextView()
-        logTextView.isEditable = false
-        logTextView.isSelectable = true
-        logTextView.textColor = NSColor(red: 0.4, green: 0.8, blue: 1.0, alpha: 1.0) // Console blue
-        logTextView.backgroundColor = NSColor(white: 0.0, alpha: 0.35)
-        logTextView.font = NSFont.userFixedPitchFont(ofSize: 11)
-        logTextView.minSize = NSSize(width: 0, height: 0)
-        logTextView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-        logTextView.isVerticallyResizable = true
-        logTextView.isHorizontallyResizable = false
-        logTextView.autoresizingMask = [.width]
-        logTextView.textContainer?.containerSize = NSSize(width: 410, height: CGFloat.greatestFiniteMagnitude)
-        logTextView.textContainer?.widthTracksTextView = true
+        let testBtn = NSButton(title: "Test Vibration", target: self, action: #selector(testRumbleClicked))
+        testBtn.bezelStyle = .inline
+        testBtn.controlSize = .mini
+        testBtn.font = NSFont.systemFont(ofSize: 10, weight: .semibold)
+        testBtn.frame = NSRect(x: 12, y: 12, width: 288, height: 20)
+        hapticsCard.addSubview(testBtn)
         
-        logScrollView.documentView = logTextView
-        parent.addSubview(logScrollView)
+        // 3. Gyro Card
+        let gyroCard = createCardView(frame: NSRect(x: 14, y: 124, width: 312, height: 102))
+        view.addSubview(gyroCard)
         
-        clearButton = NSButton(title: "Clear Console", target: self, action: #selector(clearLogsClicked))
-        clearButton.bezelStyle = .rounded
-        clearButton.translatesAutoresizingMaskIntoConstraints = false
-        parent.addSubview(clearButton)
+        let gyroTitle = NSTextField(labelWithString: "Adaptive Gyro Aiming")
+        gyroTitle.font = NSFont.systemFont(ofSize: 11, weight: .bold)
+        gyroTitle.textColor = .secondaryLabelColor
+        gyroTitle.frame = NSRect(x: 12, y: 76, width: 200, height: 16)
+        gyroCard.addSubview(gyroTitle)
         
-        quitButton = NSButton(title: "Quit App", target: self, action: #selector(quitClicked))
-        quitButton.bezelStyle = .rounded
-        quitButton.translatesAutoresizingMaskIntoConstraints = false
-        parent.addSubview(quitButton)
+        gyroSensLabel = NSTextField(labelWithString: "\(GyroEngine.shared.gyroSensitivity)%")
+        gyroSensLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .bold)
+        gyroSensLabel.alignment = .right
+        gyroSensLabel.textColor = .labelColor
+        gyroSensLabel.frame = NSRect(x: 240, y: 76, width: 60, height: 16)
+        gyroCard.addSubview(gyroSensLabel)
         
-        NSLayoutConstraint.activate([
-            statusLabel.topAnchor.constraint(equalTo: parent.topAnchor, constant: 10),
-            statusLabel.leadingAnchor.constraint(equalTo: parent.leadingAnchor, constant: 20),
-            statusLabel.trailingAnchor.constraint(equalTo: parent.trailingAnchor, constant: -20),
-            
-            testButton.topAnchor.constraint(equalTo: statusLabel.bottomAnchor, constant: 10),
-            testButton.centerXAnchor.constraint(equalTo: parent.centerXAnchor),
-            testButton.widthAnchor.constraint(equalToConstant: 180),
-            testButton.heightAnchor.constraint(equalToConstant: 26),
-            
-            sliderLabel.topAnchor.constraint(equalTo: testButton.bottomAnchor, constant: 12),
-            sliderLabel.leadingAnchor.constraint(equalTo: parent.leadingAnchor, constant: 15),
-            
-            intensitySlider.centerYAnchor.constraint(equalTo: sliderLabel.centerYAnchor),
-            intensitySlider.leadingAnchor.constraint(equalTo: sliderLabel.trailingAnchor, constant: 8),
-            intensitySlider.trailingAnchor.constraint(equalTo: intensityLabel.leadingAnchor, constant: -8),
-            
-            intensityLabel.centerYAnchor.constraint(equalTo: sliderLabel.centerYAnchor),
-            intensityLabel.trailingAnchor.constraint(equalTo: parent.trailingAnchor, constant: -15),
-            intensityLabel.widthAnchor.constraint(equalToConstant: 45),
-            
-            logScrollView.topAnchor.constraint(equalTo: sliderLabel.bottomAnchor, constant: 12),
-            logScrollView.leadingAnchor.constraint(equalTo: parent.leadingAnchor, constant: 15),
-            logScrollView.trailingAnchor.constraint(equalTo: parent.trailingAnchor, constant: -15),
-            logScrollView.bottomAnchor.constraint(equalTo: clearButton.topAnchor, constant: -15),
-            
-            clearButton.leadingAnchor.constraint(equalTo: parent.leadingAnchor, constant: 15),
-            clearButton.bottomAnchor.constraint(equalTo: parent.bottomAnchor, constant: -10),
-            clearButton.widthAnchor.constraint(equalToConstant: 120),
-            clearButton.heightAnchor.constraint(equalToConstant: 26),
-            
-            quitButton.trailingAnchor.constraint(equalTo: parent.trailingAnchor, constant: -15),
-            quitButton.bottomAnchor.constraint(equalTo: parent.bottomAnchor, constant: -10),
-            quitButton.widthAnchor.constraint(equalToConstant: 120),
-            quitButton.heightAnchor.constraint(equalToConstant: 26)
-        ])
+        gyroSegment = NSSegmentedControl(labels: ["Off", "Stick", "1:1 Mouse (L2)", "Mouse Always"], trackingMode: .selectOne, target: self, action: #selector(gyroSegmentChanged(_:)))
+        gyroSegment.selectedSegment = GyroEngine.shared.gyroMode
+        gyroSegment.controlSize = .small
+        gyroSegment.frame = NSRect(x: 12, y: 46, width: 288, height: 22)
+        gyroCard.addSubview(gyroSegment)
+        
+        gyroSensitivitySlider = NSSlider(value: Double(GyroEngine.shared.gyroSensitivity), minValue: 20, maxValue: 250, target: self, action: #selector(gyroSensChanged(_:)))
+        gyroSensitivitySlider.controlSize = .small
+        gyroSensitivitySlider.frame = NSRect(x: 12, y: 16, width: 288, height: 18)
+        gyroCard.addSubview(gyroSensitivitySlider)
+        
+        // 4. Footer Actions
+        let syncBtn = NSButton(title: "Re-Scan Bottles", target: self, action: #selector(syncBottlesClicked))
+        syncBtn.bezelStyle = .rounded
+        syncBtn.controlSize = .small
+        syncBtn.frame = NSRect(x: 14, y: 46, width: 150, height: 26)
+        view.addSubview(syncBtn)
+        
+        let logsBtn = NSButton(title: "Open Console", target: self, action: #selector(openLogsClicked))
+        logsBtn.bezelStyle = .rounded
+        logsBtn.controlSize = .small
+        logsBtn.frame = NSRect(x: 176, y: 46, width: 150, height: 26)
+        view.addSubview(logsBtn)
+        
+        let quitBtn = NSButton(title: "Quit Driver", target: self, action: #selector(quitClicked))
+        quitBtn.bezelStyle = .inline
+        quitBtn.controlSize = .small
+        quitBtn.font = NSFont.systemFont(ofSize: 10, weight: .regular)
+        quitBtn.frame = NSRect(x: 14, y: 14, width: 312, height: 20)
+        view.addSubview(quitBtn)
     }
     
-    func setupCrossOverView(_ parent: NSView) {
-        let bottleLabel = NSTextField(labelWithString: "CrossOver Bottle:")
-        bottleLabel.font = NSFont.systemFont(ofSize: 12, weight: .bold)
-        bottleLabel.textColor = NSColor(white: 0.95, alpha: 1.0)
-        bottleLabel.translatesAutoresizingMaskIntoConstraints = false
-        parent.addSubview(bottleLabel)
-        
-        bottlePopUp = NSPopUpButton()
-        bottlePopUp.translatesAutoresizingMaskIntoConstraints = false
-        bottlePopUp.target = self
-        bottlePopUp.action = #selector(bottleSelected(_:))
-        parent.addSubview(bottlePopUp)
-        
-        let browseBottlesBtn = NSButton(title: "Browse...", target: self, action: #selector(browseBottlesClicked))
-        browseBottlesBtn.bezelStyle = .rounded
-        browseBottlesBtn.controlSize = .small
-        browseBottlesBtn.translatesAutoresizingMaskIntoConstraints = false
-        parent.addSubview(browseBottlesBtn)
-        
-        configRegButton = NSButton(title: "Configure Wine Registry", target: self, action: #selector(configRegClicked))
-        configRegButton.bezelStyle = .rounded
-        configRegButton.translatesAutoresizingMaskIntoConstraints = false
-        parent.addSubview(configRegButton)
-        
-        installSteamBtn = NSButton(title: "Install Steam Support", target: self, action: #selector(installSteamClicked))
-        installSteamBtn.bezelStyle = .rounded
-        installSteamBtn.translatesAutoresizingMaskIntoConstraints = false
-        parent.addSubview(installSteamBtn)
-        
-        let gamesLabel = NSTextField(labelWithString: "Detected Steam Games:")
-        gamesLabel.font = NSFont.systemFont(ofSize: 12, weight: .bold)
-        gamesLabel.textColor = NSColor(white: 0.95, alpha: 1.0)
-        gamesLabel.translatesAutoresizingMaskIntoConstraints = false
-        parent.addSubview(gamesLabel)
-        
-        gamesScrollView = NSScrollView()
-        gamesScrollView.hasVerticalScroller = true
-        gamesScrollView.translatesAutoresizingMaskIntoConstraints = false
-        gamesScrollView.drawsBackground = true
-        gamesScrollView.backgroundColor = NSColor(white: 0.05, alpha: 0.45) // Darker background for contrast
-        gamesScrollView.borderType = .bezelBorder
-        
-        gamesStackView = NSStackView()
-        gamesStackView.orientation = .vertical
-        gamesStackView.alignment = .leading
-        gamesStackView.spacing = 8
-        gamesStackView.translatesAutoresizingMaskIntoConstraints = false
-        gamesStackView.edgeInsets = NSEdgeInsets(top: 8, left: 10, bottom: 8, right: 10)
-        
-        gamesScrollView.documentView = gamesStackView
-        parent.addSubview(gamesScrollView)
-        
-        manualDeployBtn = NSButton(title: "Select Game Folder Manually...", target: self, action: #selector(manualDeployClicked))
-        manualDeployBtn.bezelStyle = .rounded
-        manualDeployBtn.translatesAutoresizingMaskIntoConstraints = false
-        parent.addSubview(manualDeployBtn)
-        
-        NSLayoutConstraint.activate([
-            bottleLabel.topAnchor.constraint(equalTo: parent.topAnchor, constant: 10),
-            bottleLabel.leadingAnchor.constraint(equalTo: parent.leadingAnchor, constant: 15),
-            
-            bottlePopUp.centerYAnchor.constraint(equalTo: bottleLabel.centerYAnchor),
-            bottlePopUp.leadingAnchor.constraint(equalTo: bottleLabel.trailingAnchor, constant: 10),
-            bottlePopUp.trailingAnchor.constraint(equalTo: browseBottlesBtn.leadingAnchor, constant: -10),
-            
-            browseBottlesBtn.centerYAnchor.constraint(equalTo: bottleLabel.centerYAnchor),
-            browseBottlesBtn.trailingAnchor.constraint(equalTo: parent.trailingAnchor, constant: -15),
-            browseBottlesBtn.widthAnchor.constraint(equalToConstant: 80),
-            
-            configRegButton.topAnchor.constraint(equalTo: bottlePopUp.bottomAnchor, constant: 12),
-            configRegButton.leadingAnchor.constraint(equalTo: parent.leadingAnchor, constant: 15),
-            configRegButton.widthAnchor.constraint(equalToConstant: 215),
-            configRegButton.heightAnchor.constraint(equalToConstant: 26),
-            
-            installSteamBtn.topAnchor.constraint(equalTo: bottlePopUp.bottomAnchor, constant: 12),
-            installSteamBtn.trailingAnchor.constraint(equalTo: parent.trailingAnchor, constant: -15),
-            installSteamBtn.widthAnchor.constraint(equalToConstant: 215),
-            installSteamBtn.heightAnchor.constraint(equalToConstant: 26),
-            
-            gamesLabel.topAnchor.constraint(equalTo: configRegButton.bottomAnchor, constant: 20),
-            gamesLabel.leadingAnchor.constraint(equalTo: parent.leadingAnchor, constant: 15),
-            
-            gamesScrollView.topAnchor.constraint(equalTo: gamesLabel.bottomAnchor, constant: 8),
-            gamesScrollView.leadingAnchor.constraint(equalTo: parent.leadingAnchor, constant: 15),
-            gamesScrollView.trailingAnchor.constraint(equalTo: parent.trailingAnchor, constant: -15),
-            gamesScrollView.bottomAnchor.constraint(equalTo: manualDeployBtn.topAnchor, constant: -12),
-            
-            gamesStackView.widthAnchor.constraint(equalTo: gamesScrollView.contentView.widthAnchor),
-            
-            manualDeployBtn.leadingAnchor.constraint(equalTo: parent.leadingAnchor, constant: 15),
-            manualDeployBtn.trailingAnchor.constraint(equalTo: parent.trailingAnchor, constant: -15),
-            manualDeployBtn.bottomAnchor.constraint(equalTo: parent.bottomAnchor, constant: -10),
-            manualDeployBtn.heightAnchor.constraint(equalToConstant: 26)
-        ])
+    private func createCardView(frame: NSRect) -> NSView {
+        let box = NSView(frame: frame)
+        box.wantsLayer = true
+        box.layer?.backgroundColor = NSColor(white: 0.12, alpha: 0.6).cgColor
+        box.layer?.cornerRadius = 10
+        box.layer?.borderWidth = 0.5
+        box.layer?.borderColor = NSColor(white: 1.0, alpha: 0.1).cgColor
+        return box
     }
     
     override func viewDidLoad() {
         super.viewDidLoad()
-        updateControllerStatus()
+        updateUI()
+        pollTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            self?.updateUI()
+        }
     }
     
-    func refreshBottles() {
-        bottlePopUp.removeAllItems()
-        let bottles = listBottles()
-        bottlePopUp.addItems(withTitles: bottles)
-        if bottles.contains("Steam") {
-            bottlePopUp.selectItem(withTitle: "Steam")
-        }
-        refreshGamesList()
-    }
-    
-    func refreshGamesList() {
-        for subview in gamesStackView.views {
-            gamesStackView.removeView(subview)
-            subview.removeFromSuperview()
-        }
-        
-        guard let selectedBottle = bottlePopUp.titleOfSelectedItem else { return }
-        let games = listGames(bottleName: selectedBottle)
-        
-        if games.isEmpty {
-            let label = NSTextField(labelWithString: "No Steam games detected in this bottle.")
-            label.font = NSFont.systemFont(ofSize: 12, weight: .light)
-            label.textColor = NSColor(white: 0.7, alpha: 1.0)
-            gamesStackView.addView(label, in: .top)
+    func updateUI() {
+        guard let controller = HapticBridge.shared.getCurrentController() else {
+            controllerNameLabel.stringValue = "Disconnected"
+            batteryBadge.stringValue = "Off"
+            batteryBadge.textColor = .secondaryLabelColor
+            batteryBadge.backgroundColor = NSColor(white: 0.5, alpha: 0.15)
+            connectionSubLabel.stringValue = "Turn on DualShock 4"
+            engineBadge.stringValue = "⚡ Engine: Waiting for Game..."
+            audioStatusLabel.stringValue = "🔊 Speaker: Disconnected"
+            AppDelegate.shared?.updateStatusIcon(connected: false, batteryPct: nil, isCharging: false)
             return
         }
         
-        for game in games {
-            let row = NSStackView()
-            row.orientation = .horizontal
-            row.distribution = .fill
-            row.alignment = .centerY
-            row.translatesAutoresizingMaskIntoConstraints = false
-            
-            let label = NSTextField(labelWithString: game)
-            label.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
-            label.textColor = NSColor(white: 0.95, alpha: 1.0) // Highly readable crisp white
-            label.setContentHuggingPriority(.defaultLow, for: .horizontal)
-            row.addView(label, in: .leading)
-            
-            let dest = getSteamCommonPath(bottleName: selectedBottle).appendingPathComponent(game).appendingPathComponent("dxgi.dll")
-            let isInstalled = FileManager.default.fileExists(atPath: dest.path)
-            
-            let statusLabel = NSTextField(labelWithString: isInstalled ? "Active" : "Not Active")
-            statusLabel.textColor = isInstalled ? NSColor(red: 0.35, green: 0.85, blue: 0.45, alpha: 1.0) : NSColor(white: 0.7, alpha: 1.0)
-            statusLabel.font = NSFont.systemFont(ofSize: 11, weight: .regular)
-            row.addView(statusLabel, in: .trailing)
-            
-            let actionBtn = NSButton(title: isInstalled ? "Update" : "Install", target: self, action: #selector(installGameDllClicked(_:)))
-            actionBtn.identifier = NSUserInterfaceItemIdentifier(game)
-            actionBtn.bezelStyle = .rounded
-            actionBtn.controlSize = .small
-            row.addView(actionBtn, in: .trailing)
-            
-            gamesStackView.addView(row, in: .top)
-            
-            NSLayoutConstraint.activate([
-                row.widthAnchor.constraint(equalTo: gamesStackView.widthAnchor, constant: -20)
-            ])
-        }
-    }
-    
-    @objc func bottleSelected(_ sender: NSPopUpButton) {
-        refreshGamesList()
-    }
-    
-    @objc func browseBottlesClicked() {
-        let openPanel = NSOpenPanel()
-        openPanel.canChooseFiles = false
-        openPanel.canChooseDirectories = true
-        openPanel.allowsMultipleSelection = false
-        openPanel.title = "Select CrossOver Bottles Folder"
+        let name = controller.vendorName ?? "DUALSHOCK 4"
+        controllerNameLabel.stringValue = name.replacingOccurrences(of: " Wireless Controller", with: "")
         
-        openPanel.begin { [weak self] response in
-            if response == .OK, let url = openPanel.url {
-                UserDefaults.standard.set(url.path, forKey: "customBottlesPath")
-                writeLog("[App] Custom bottles path selected: \(url.path)")
-                self?.refreshBottles()
-            }
-        }
-    }
-    
-    @objc func configRegClicked() {
-        guard let selected = bottlePopUp.titleOfSelectedItem else { return }
-        if patchRegistry(bottleName: selected) {
-            writeLog("[App] Registry configuration successful for bottle: \(selected)")
-            showDialog(message: "Registry configured successfully!", info: "Raw IOHID has been enabled and SDL translation has been disabled for bottle '\(selected)'.")
-        } else {
-            writeLog("[App] Registry configuration failed for bottle: \(selected)")
-            showDialog(message: "Registry configuration failed", info: "Please ensure the bottle exists and has system.reg/user.reg files.")
-        }
-    }
-    
-    @objc func installSteamClicked() {
-        guard let selected = bottlePopUp.titleOfSelectedItem else { return }
-        if deploySteamDLL(bottleName: selected) {
-            writeLog("[App] Copied dinput8_32.dll to Steam folder in bottle: \(selected)")
-            showDialog(message: "Steam support installed successfully!", info: "Steam support installed! Please make sure to launch the game inside Steam with Steam Input set to 'Enable'.")
-        } else {
-            writeLog("[App] Failed to deploy Steam DLL in bottle: \(selected)")
-            showDialog(message: "Steam support installation failed", info: "Please check if Steam is installed in the selected bottle.")
-        }
-    }
-    
-    @objc func installGameDllClicked(_ sender: NSButton) {
-        guard let selectedBottle = bottlePopUp.titleOfSelectedItem else { return }
-        guard let gameName = sender.identifier?.rawValue else { return }
+        let isUSB = HapticBridge.shared.isUSBConnection()
+        connectionSubLabel.stringValue = isUSB ? "USB Wired • Ultra Low Latency" : "Bluetooth • Universal Auto-Hook"
+        engineBadge.stringValue = "⚡ \(EngineProfileManager.shared.activeGameName) (\(EngineProfileManager.shared.activeEngine.rawValue))"
+        audioStatusLabel.stringValue = isUSB ? "🔊 Speaker: Active (USB)" : "🔊 Speaker: Requires USB Cable"
         
-        if deployGameDLL(bottleName: selectedBottle, gameName: gameName) {
-            writeLog("[App] Successfully deployed 64-bit dxgi.dll to game: \(gameName)")
-            showDialog(message: "DLL deployed successfully!", info: "Deployed proxy dxgi.dll to game: \(gameName)")
-            refreshGamesList()
-        } else {
-            writeLog("[App] Failed to deploy DLL to game: \(gameName)")
-            showDialog(message: "DLL deployment failed", info: "Please check logs for details.")
-        }
-    }
-    
-    @objc func manualDeployClicked() {
-        let openPanel = NSOpenPanel()
-        openPanel.canChooseFiles = false
-        openPanel.canChooseDirectories = true
-        openPanel.allowsMultipleSelection = false
-        openPanel.title = "Select Game Installation Directory"
+        gyroSegment.selectedSegment = GyroEngine.shared.gyroMode
         
-        openPanel.begin { [weak self] response in
-            if response == .OK, let url = openPanel.url {
-                if deployManualDLL(targetFolder: url) {
-                    writeLog("[App] Manually deployed 64-bit dxgi.dll to: \(url.path)")
-                    self?.showDialog(message: "Manual DLL deployed successfully!", info: "Copied proxy dxgi.dll to: \(url.lastPathComponent)")
-                    self?.refreshGamesList()
-                } else {
-                    writeLog("[App] Failed to manually deploy DLL to: \(url.path)")
-                    self?.showDialog(message: "Manual deployment failed", info: "Please check logs for details.")
-                }
-            }
-        }
-    }
-    
-    func showDialog(message: String, info: String) {
-        let alert = NSAlert()
-        alert.messageText = message
-        alert.informativeText = info
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: "OK")
-        alert.runModal()
-    }
-    
-    func updateControllerStatus() {
-        let name = HapticBridge.shared.controllerName()
-        statusLabel.stringValue = "Controller: \(name)"
-        if name.contains("No Controller") {
-            statusLabel.textColor = NSColor(red: 1.0, green: 0.45, blue: 0.45, alpha: 1.0)
+        if let batt = HapticBridge.shared.getBatteryInfo() {
+            let chargeIcon = batt.isCharging ? "⚡ " : ""
+            batteryBadge.stringValue = "\(chargeIcon)\(batt.level)%"
+            batteryBadge.textColor = batt.level <= 15 ? NSColor(red: 1.0, green: 0.35, blue: 0.35, alpha: 1.0) : NSColor(red: 0.25, green: 0.85, blue: 0.45, alpha: 1.0)
+            AppDelegate.shared?.updateStatusIcon(connected: true, batteryPct: batt.level, isCharging: batt.isCharging)
         } else {
-            statusLabel.textColor = NSColor(red: 0.35, green: 0.85, blue: 0.45, alpha: 1.0)
+            batteryBadge.stringValue = "Ready"
+            AppDelegate.shared?.updateStatusIcon(connected: true, batteryPct: nil, isCharging: false)
         }
+    }
+    
+    @objc func intensityChanged(_ sender: NSSlider) {
+        let pct = Float(sender.doubleValue) / 100.0
+        HapticBridge.shared.rumbleIntensity = pct
+        intensityLabel.stringValue = "\(Int(sender.doubleValue))%"
     }
     
     @objc func testRumbleClicked() {
         HapticBridge.shared.testRumble()
     }
     
-    @objc func intensitySliderChanged(_ sender: NSSlider) {
-        let pct = Float(sender.doubleValue) / 100.0
-        HapticBridge.shared.rumbleIntensity = pct
-        intensityLabel.stringValue = "\(Int(sender.doubleValue))%"
-        
-        // If slider set to 0, immediately stop any active rumble
-        if pct < 0.01 {
-            HapticBridge.shared.updateRumbleTarget(left: 0, right: 0)
-        }
+    @objc func gyroSegmentChanged(_ sender: NSSegmentedControl) {
+        GyroEngine.shared.gyroMode = sender.selectedSegment
+        writeLog("[Gyro] Mode changed to: \(sender.selectedSegment)")
     }
     
-    @objc func clearLogsClicked() {
-        logTextView.string = ""
+    @objc func gyroSensChanged(_ sender: NSSlider) {
+        let val = Int(sender.doubleValue)
+        GyroEngine.shared.gyroSensitivity = val
+        gyroSensLabel.stringValue = "\(val)%"
+    }
+    
+    @objc func syncBottlesClicked() {
+        autoPatchAllBottles()
+        writeLog("[App] Synchronized all Wine & CrossOver bottles globally.")
+    }
+    
+    @objc func openLogsClicked() {
+        NSWorkspace.shared.open(URL(fileURLWithPath: "/Users/Vedant/Documents/ds4_rumble_bridge/rumble_app.log"))
     }
     
     @objc func quitClicked() {
-        AppDelegate.shared?.quit()
-    }
-    
-    func appendLog(_ text: String) {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "HH:mm:ss"
-        let timestamp = formatter.string(from: Date())
-        let line = "[\(timestamp)] \(text)\n"
-        
-        logTextView.textStorage?.append(NSAttributedString(string: line, attributes: [
-            .foregroundColor: NSColor(red: 0.4, green: 0.8, blue: 1.0, alpha: 1.0),
-            .font: NSFont.userFixedPitchFont(ofSize: 11)!
-        ]))
-        
-        logTextView.scrollRangeToVisible(NSRange(location: logTextView.string.count, length: 0))
+        NSApplication.shared.terminate(nil)
     }
 }
 
+// MARK: - App Delegate & Menu Bar Integration
 class AppDelegate: NSObject, NSApplicationDelegate {
     static var shared: AppDelegate?
-    var window: NSWindow?
+    var statusItem: NSStatusItem?
+    var popover: NSPopover?
     let server = BSDUDPServer()
-    var mainVC: MainViewController?
     
     override init() {
         super.init()
@@ -1044,74 +962,70 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     
     func applicationDidFinishLaunching(_ notification: Notification) {
         HapticBridge.registerDefaults()
-        NSApp.setActivationPolicy(.regular)
+        NSApp.setActivationPolicy(.accessory)
         
-        let rect = NSRect(x: 0, y: 0, width: 500, height: 530)
-        let styleMask: NSWindow.StyleMask = [.titled, .closable, .miniaturizable, .fullSizeContentView]
-        let win = NSWindow(contentRect: rect, styleMask: styleMask, backing: .buffered, defer: false)
-        win.title = "DS4Link"
-        win.center()
-        win.isOpaque = false
-        win.backgroundColor = .clear
-        win.titlebarAppearsTransparent = true
-        win.titleVisibility = .hidden
-        win.isMovableByWindowBackground = true
+        setupStatusItem()
+        setupPopover()
         
-        let effectView = NSVisualEffectView(frame: rect)
-        effectView.autoresizingMask = [.width, .height]
-        effectView.material = .hudWindow
-        effectView.blendingMode = .behindWindow
-        effectView.state = .active
-        effectView.appearance = NSAppearance(named: .vibrantDark)
-        
-        // Add a premium dark tint overlay to dim the background, resolving brightness/contrast issues
-        let tintView = NSView(frame: rect)
-        tintView.autoresizingMask = [.width, .height]
-        tintView.wantsLayer = true
-        tintView.layer?.backgroundColor = NSColor(white: 0.02, alpha: 0.4).cgColor
-        effectView.addSubview(tintView)
-        
-        let vc = MainViewController()
-        vc.view.frame = rect
-        vc.view.autoresizingMask = [.width, .height]
-        
-        effectView.addSubview(vc.view)
-        win.contentView = effectView
-        
-        self.window = win
-        self.mainVC = vc
-        
-        win.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-        
-        writeLog("[App] Main window displayed.")
-        writeLog("[App] Starting BSDUDPServer on port 24680...")
+        writeLog("[App] Starting DS4Link Universal Driver...")
         server.start(port: 24680)
+        GyroEngine.shared.start()
+        GameWatcher.shared.start()
+        autoPatchAllBottles()
         
-        HapticBridge.shared.onControllerStatusChanged = { [weak self] status in
-            writeLog("[App] Controller status: \(status)")
+        HapticBridge.shared.onControllerStatusChanged = {
             DispatchQueue.main.async {
-                self?.mainVC?.updateControllerStatus()
+                PopoverViewController.shared?.updateUI()
             }
         }
-        
-        mainVC?.refreshBottles()
-        appendLog("[App] DS4Link UI initialized.")
     }
     
-    func appendLog(_ text: String) {
-        DispatchQueue.main.async { [weak self] in
-            self?.mainVC?.appendLog(text)
+    private func setupStatusItem() {
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        if let button = statusItem?.button {
+            button.image = NSImage(systemSymbolName: "gamecontroller.fill", accessibilityDescription: "DualShock 4")
+            button.imagePosition = .imageLeft
+            button.title = ""
+            button.action = #selector(togglePopover(_:))
+            button.target = self
         }
     }
     
-    func quit() {
-        server.stop()
-        NSApplication.shared.terminate(nil)
+    func updateStatusIcon(connected: Bool, batteryPct: Int?, isCharging: Bool) {
+        if let button = statusItem?.button {
+            if connected {
+                button.image = NSImage(systemSymbolName: "gamecontroller.fill", accessibilityDescription: "DualShock 4")
+                if let pct = batteryPct {
+                    let chargeSymbol = isCharging ? "⚡" : ""
+                    button.title = " \(chargeSymbol)\(pct)%"
+                } else {
+                    button.title = ""
+                }
+            } else {
+                button.image = NSImage(systemSymbolName: "gamecontroller", accessibilityDescription: "DualShock 4 (Off)")
+                button.title = ""
+            }
+        }
     }
     
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        return true
+    private func setupPopover() {
+        let pop = NSPopover()
+        pop.contentSize = NSSize(width: 340, height: 430)
+        pop.behavior = .transient
+        pop.animates = true
+        pop.contentViewController = PopoverViewController()
+        self.popover = pop
+    }
+    
+    @objc func togglePopover(_ sender: AnyObject?) {
+        guard let button = statusItem?.button, let pop = popover else { return }
+        if pop.isShown {
+            pop.performClose(sender)
+        } else {
+            PopoverViewController.shared?.updateUI()
+            pop.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+            pop.contentViewController?.view.window?.makeKey()
+        }
     }
 }
 

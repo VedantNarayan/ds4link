@@ -70,7 +70,8 @@ for line in user_lines:
     if strip_line.startswith("[Software\\\\Wine\\\\DllOverrides]"):
         in_override_section = True
         new_user_lines.append(line)
-        new_user_lines.append('"dinput8"="native,builtin"')
+        new_user_lines.append('"dinput8"="native,builtin"
+        new_user_lines.append("\"windows.gaming.input\"=\"\"")')
         dinput8_added = True
         continue
     elif strip_line.startswith("[") and in_override_section:
@@ -94,47 +95,114 @@ for line in user_lines:
 if not dinput8_added:
     new_user_lines.append("")
     new_user_lines.append("[Software\\\\Wine\\\\DllOverrides]")
-    new_user_lines.append('"dinput8"="native,builtin"')
+    new_user_lines.append('"dinput8"="native,builtin"
+        new_user_lines.append("\"windows.gaming.input\"=\"\"")')
 
 with open(user_reg_path, "w", encoding="utf-8") as f:
     f.write("\n".join(new_user_lines) + "\n")
 print("user.reg: Configured DLL overrides for dinput8 to native,builtin.")
 
 
-# 3. Disable Steam's raw HID rumble for Horizon Forbidden West in localconfig.vdf
+# 2b. Disable Windows.Gaming.Input for Shadow of the Tomb Raider to fix stick drift and detection
+with open(user_reg_path, "r", encoding="utf-8", errors="ignore") as f:
+    user_content2 = f.read()
+
+user_lines2 = user_content2.splitlines()
+in_tomb_raider_section = False
+tomb_raider_key_found = False
+tomb_raider_section_found = False
+new_user_lines2 = []
+
+for line in user_lines2:
+    strip_line = line.strip()
+    norm_line = strip_line.replace(chr(92), '')
+    if norm_line.startswith("[SoftwareEidos MontrealShadow of the Tomb RaiderInput]"):
+        in_tomb_raider_section = True
+        tomb_raider_section_found = True
+        new_user_lines2.append(line)
+        continue
+    elif strip_line.startswith("[") and in_tomb_raider_section:
+        if not tomb_raider_key_found:
+            new_user_lines2.append('"EnableWindowsGamingInput"=dword:00000000')
+            new_user_lines2.append('"EnableLibScePad"=dword:00000001')
+            tomb_raider_key_found = True
+        in_tomb_raider_section = False
+        new_user_lines2.append(line)
+        continue
+    
+    if in_tomb_raider_section:
+        if strip_line.startswith('"EnableWindowsGamingInput"='):
+            new_user_lines2.append('"EnableWindowsGamingInput"=dword:00000000')
+            tomb_raider_key_found = True
+        elif strip_line.startswith('"EnableLibScePad"='):
+            new_user_lines2.append('"EnableLibScePad"=dword:00000001')
+        else:
+            new_user_lines2.append(line)
+    else:
+        new_user_lines2.append(line)
+
+if in_tomb_raider_section and not tomb_raider_key_found:
+    new_user_lines2.append('"EnableWindowsGamingInput"=dword:00000000')
+    new_user_lines2.append('"EnableLibScePad"=dword:00000001')
+    tomb_raider_key_found = True
+
+if not tomb_raider_section_found:
+    new_user_lines2.append("")
+    new_user_lines2.append("[Software\\\\Eidos Montreal\\\\Shadow of the Tomb Raider\\\\Input]")
+    new_user_lines2.append('"EnableWindowsGamingInput"=dword:00000000')
+    new_user_lines2.append('"EnableLibScePad"=dword:00000001')
+    new_user_lines2.append("")
+    new_user_lines2.append("[Software\\\\\\\\Eidos Montreal\\\\\\\\Shadow of the Tomb Raider\\\\\\\\Input]")
+    new_user_lines2.append('"EnableWindowsGamingInput"=dword:00000000')
+    new_user_lines2.append('"EnableLibScePad"=dword:00000001')
+
+with open(user_reg_path, "w", encoding="utf-8") as f:
+    f.write("\n".join(new_user_lines2) + "\n")
+print("user.reg: Disabled Windows.Gaming.Input for Shadow of the Tomb Raider.")
+
+
+# 3. Disable Steam's raw HID rumble for Horizon Forbidden West and Shadow of the Tomb Raider in localconfig.vdf
 localconfig_path = "/Volumes/Mac_EXT/CrossOverData/CrossOver/Bottles/Steam/drive_c/program files (x86)/Steam/userdata/1122884104/config/localconfig.vdf"
 if os.path.exists(localconfig_path):
     with open(localconfig_path, "r", encoding="utf-8", errors="ignore") as f:
         lc_content = f.read()
     
-    # Add app 2420110 (Horizon Forbidden West) with rumble disabled if not present
-    if '"2420110"' not in lc_content:
-        # Insert before the closing brace of the "apps" block
-        lc_content = lc_content.replace(
-            '\t}\n\t"controller_config"',
-            '\t\t"2420110"\n\t\t{\n\t\t\t"UseSteamControllerConfig"\t\t"2"\n\t\t\t"SteamControllerRumble"\t\t"0"\n\t\t\t"SteamControllerRumbleIntensity"\t\t"0"\n\t\t}\n\t}\n\t"controller_config"'
-        )
-    else:
-        # If app exists, set rumble to 0
-        import re
-        # Match the 2420110 block and replace rumble settings
-        lc_content = re.sub(
-            r'("2420110"\s*\{[^}]*"SteamControllerRumble"\s*")([^"]*)',
-            r'\g<1>0',
-            lc_content
-        )
-        lc_content = re.sub(
-            r'("2420110"\s*\{[^}]*"SteamControllerRumbleIntensity"\s*")([^"]*)',
-            r'\g<1>0',
-            lc_content
-        )
+    import re
+    target_apps = ["2420110", "750920"]
+    for app in target_apps:
+        if '"' + app + '"' not in lc_content:
+            lc_content = lc_content.replace(
+                '\t}\n\t"controller_config"',
+                '\t\t"' + app + '"\n\t\t{\n\t\t\t"UseSteamControllerConfig"\t\t"2"\n\t\t\t"SteamControllerRumble"\t\t"0"\n\t\t\t"SteamControllerRumbleIntensity"\t\t"0"\n\t\t}\n\t}\n\t"controller_config"'
+            )
+        else:
+            app_pattern = re.compile(r'("' + app + r'"\s*\{[^}]*\})')
+            match = app_pattern.search(lc_content)
+            if match:
+                block = match.group(1)
+                new_block = block
+                if '"UseSteamControllerConfig"' in new_block:
+                    new_block = re.sub(r'("UseSteamControllerConfig"\s*")([^"]*)', r'\g<1>2', new_block)
+                else:
+                    new_block = new_block.replace('{', '{\n\t\t\t"UseSteamControllerConfig"\t\t"2"')
+                    
+                if '"SteamControllerRumble"' in new_block:
+                    new_block = re.sub(r'("SteamControllerRumble"\s*")([^"]*)', r'\g<1>0', new_block)
+                else:
+                    new_block = new_block.replace('{', '{\n\t\t\t"SteamControllerRumble"\t\t"0"')
+                    
+                if '"SteamControllerRumbleIntensity"' in new_block:
+                    new_block = re.sub(r'("SteamControllerRumbleIntensity"\s*")([^"]*)', r'\g<1>0', new_block)
+                else:
+                    new_block = new_block.replace('{', '{\n\t\t\t"SteamControllerRumbleIntensity"\t\t"0"')
+                lc_content = lc_content.replace(block, new_block)
     
     # Also disable rumble globally for all existing apps
     lc_content = lc_content.replace('"SteamControllerRumble"\t\t"-1"', '"SteamControllerRumble"\t\t"0"')
     
     with open(localconfig_path, "w", encoding="utf-8") as f:
         f.write(lc_content)
-    print("localconfig.vdf: Disabled SteamControllerRumble for all apps including Horizon Forbidden West.")
+    print("localconfig.vdf: Configured Steam Input and rumble overrides for Horizon Forbidden West and Shadow of the Tomb Raider.")
 else:
     print(f"WARNING: localconfig.vdf not found at {localconfig_path}")
 

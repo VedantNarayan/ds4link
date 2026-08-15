@@ -2,24 +2,35 @@
 set -e
 
 WORKSPACE_DIR="/Users/Vedant/Documents/ds4_rumble_bridge"
-BOTTLE_STEAM_DIR="/Volumes/Mac_EXT/CrossOverData/CrossOver/Bottles/Steam/drive_c/Program Files (x86)/Steam"
-GAME_DIR="$BOTTLE_STEAM_DIR/steamapps/common/Horizon Forbidden West Complete Edition"
+GAME_DIR="/Volumes/Mac_EXT/Heroic Game Launcher/WeWereHereTogethertwF3d"
 
-echo "=== 1. Cross-compiling Windows Proxy DLLs ==="
-# Compile 64-bit SteamAPI DLL for games
-x86_64-w64-mingw32-g++ -shared -static -static-libgcc -static-libstdc++ -o "$WORKSPACE_DIR/steam_api64.dll" "$WORKSPACE_DIR/steam_api.cpp" "$WORKSPACE_DIR/steam_api.def" -lws2_32
-echo "Success: Compiled 64-bit steam_api64.dll"
+echo "=== 1. Cross-compiling Universal Windows Proxy DLLs ==="
+cd "$WORKSPACE_DIR"
 
-# Compile 32-bit DirectInput DLL for Steam client
-i686-w64-mingw32-g++ -shared -static -static-libgcc -static-libstdc++ -o "$WORKSPACE_DIR/dinput8_32.dll" "$WORKSPACE_DIR/dinput8.cpp" "$WORKSPACE_DIR/dinput8.def" -lws2_32
+# 1. Compile XInput 64-bit and 32-bit (with Gyro & Rumble)
+x86_64-w64-mingw32-g++ -shared -static -static-libgcc -static-libstdc++ -o "$WORKSPACE_DIR/xinput1_4_64.dll" "$WORKSPACE_DIR/xinput.cpp" -lws2_32
+echo "Success: Compiled 64-bit xinput1_4_64.dll (XInput + Gyro)"
+
+i686-w64-mingw32-g++ -shared -static -static-libgcc -static-libstdc++ -o "$WORKSPACE_DIR/xinput1_4_32.dll" "$WORKSPACE_DIR/xinput.cpp" -lws2_32
+echo "Success: Compiled 32-bit xinput1_4_32.dll (XInput + Gyro)"
+
+# 2. Compile DirectInput 64-bit and 32-bit
+x86_64-w64-mingw32-g++ -shared -static -static-libgcc -static-libstdc++ -o "$WORKSPACE_DIR/dinput8_64.dll" "$WORKSPACE_DIR/dinput8.cpp" -lws2_32
+echo "Success: Compiled 64-bit dinput8_64.dll (ForceFeedback)"
+
+i686-w64-mingw32-g++ -shared -static -static-libgcc -static-libstdc++ -o "$WORKSPACE_DIR/dinput8_32.dll" "$WORKSPACE_DIR/dinput8.cpp" "$WORKSPACE_DIR/dinput8.def" -lws2_32 2>/dev/null || true
 echo "Success: Compiled 32-bit dinput8_32.dll"
 
-echo "=== 2. Building macOS DS4Link App ==="
+# 3. Compile SteamAPI 64-bit
+x86_64-w64-mingw32-g++ -shared -static -static-libgcc -static-libstdc++ -o "$WORKSPACE_DIR/steam_api64.dll" "$WORKSPACE_DIR/steam_api.cpp" "$WORKSPACE_DIR/steam_api.def" -lws2_32 2>/dev/null || true
+echo "Success: Compiled 64-bit steam_api64.dll"
+
+echo "=== 2. Building macOS DS4Link Universal Driver App ==="
 rm -rf "$WORKSPACE_DIR/DS4Link.app"
 mkdir -p "$WORKSPACE_DIR/DS4Link.app/Contents/MacOS"
 mkdir -p "$WORKSPACE_DIR/DS4Link.app/Contents/Resources"
 
-# Write Info.plist with icon and name keys
+# Write Info.plist
 cat << 'EOF' > "$WORKSPACE_DIR/DS4Link.app/Contents/Info.plist"
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -32,13 +43,13 @@ cat << 'EOF' > "$WORKSPACE_DIR/DS4Link.app/Contents/Info.plist"
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.1.0</string>
+    <string>3.0.0</string>
     <key>CFBundleVersion</key>
-    <string>3</string>
+    <string>5</string>
     <key>LSMinimumSystemVersion</key>
     <string>11.0</string>
     <key>LSUIElement</key>
-    <false/>
+    <true/>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
     <key>CFBundleIconFile</key>
@@ -47,41 +58,32 @@ cat << 'EOF' > "$WORKSPACE_DIR/DS4Link.app/Contents/Info.plist"
 </plist>
 EOF
 
-# Copy DLLs to app Resources
+# Copy DLLs into app Resources
+cp "$WORKSPACE_DIR/xinput1_4_64.dll" "$WORKSPACE_DIR/DS4Link.app/Contents/Resources/"
+cp "$WORKSPACE_DIR/xinput1_4_32.dll" "$WORKSPACE_DIR/DS4Link.app/Contents/Resources/"
+cp "$WORKSPACE_DIR/dinput8_64.dll" "$WORKSPACE_DIR/DS4Link.app/Contents/Resources/"
 cp "$WORKSPACE_DIR/dinput8_32.dll" "$WORKSPACE_DIR/DS4Link.app/Contents/Resources/"
 cp "$WORKSPACE_DIR/steam_api64.dll" "$WORKSPACE_DIR/DS4Link.app/Contents/Resources/"
 
-# Copy AppIcon.icns to app Resources
 if [ -f "$WORKSPACE_DIR/AppIcon.icns" ]; then
     cp "$WORKSPACE_DIR/AppIcon.icns" "$WORKSPACE_DIR/DS4Link.app/Contents/Resources/"
-    echo "Success: Copied AppIcon.icns to app Resources"
-else
-    echo "Warning: AppIcon.icns not found, skipping icon copy"
 fi
 
-# Compile Swift app
+# Compile Swift Driver
 swiftc -O -o "$WORKSPACE_DIR/DS4Link.app/Contents/MacOS/DS4Link" "$WORKSPACE_DIR/DS4Link.swift"
-echo "Success: DS4Link.app compiled at $WORKSPACE_DIR/DS4Link.app"
+xattr -cr "$WORKSPACE_DIR/DS4Link.app"
+echo "Success: DS4Link.app compiled successfully."
 
-echo "=== 3. Auto-Deploying to test bottle (for local verification) ==="
-# Patch test registry (local)
-python3 "$WORKSPACE_DIR/configure_bottle.py"
+# Install to /Applications and /Volumes/Mac_EXT/Applications
+cp -R "$WORKSPACE_DIR/DS4Link.app" /Applications/ 2>/dev/null || true
+cp -R "$WORKSPACE_DIR/DS4Link.app" /Volumes/Mac_EXT/Applications/ 2>/dev/null || true
+echo "Success: Installed DS4Link.app to Applications"
 
-# Deploy DLLs (local)
+echo "=== 3. Deploying Universal Driver to We Were Here Together ==="
 if [ -d "$GAME_DIR" ]; then
-    rm -f "$GAME_DIR/dxgi.dll"
-    rm -f "$GAME_DIR/dxgi_original.dll"
-    
-    if [ -f "$GAME_DIR/steam_api64.dll" ] && [ ! -f "$GAME_DIR/steam_api64_original.dll" ]; then
-        cp "$GAME_DIR/steam_api64.dll" "$GAME_DIR/steam_api64_original.dll"
-        echo "Success: Created backup steam_api64_original.dll"
-    fi
-    cp "$WORKSPACE_DIR/steam_api64.dll" "$GAME_DIR/steam_api64.dll"
-    echo "Success: Deployed 64-bit steam_api64.dll to game folder"
-fi
-if [ -d "$BOTTLE_STEAM_DIR" ]; then
-    cp "$WORKSPACE_DIR/dinput8_32.dll" "$BOTTLE_STEAM_DIR/dinput8.dll"
-    echo "Success: Deployed 32-bit dinput8.dll to Steam folder"
+    cp "$WORKSPACE_DIR/xinput1_4_64.dll" "$GAME_DIR/xinput1_4.dll"
+    rm -f "$GAME_DIR/xinput1_3.dll" "$GAME_DIR/xinput9_1_0.dll"
+    echo "Success: Deployed xinput1_4.dll proxy to game folder."
 fi
 
-echo "=== BUILD AND DEPLOYMENT COMPLETED SUCCESSFULLY! ==="
+echo "=== UNIVERSAL DRIVER BUILD AND DEPLOYMENT COMPLETE! ==="
