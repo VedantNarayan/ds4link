@@ -16,10 +16,10 @@ static sockaddr_in rumble_server_addr;
 static bool g_udp_initialized = false;
 static CRITICAL_SECTION init_lock;
 
-// Gyro Receiver Socket & State
-static SOCKET udp_gyro_socket = INVALID_SOCKET;
-static HANDLE hGyroThread = NULL;
-static volatile bool g_gyro_running = false;
+// Gyro & Gamepad UDP Receiver Socket & State
+static SOCKET udp_receiver_socket = INVALID_SOCKET;
+static HANDLE hReceiverThread = NULL;
+static volatile bool g_receiver_running = false;
 
 struct GyroPacket {
     uint8_t magic;         // 0x02 for gyro
@@ -30,11 +30,25 @@ struct GyroPacket {
     int16_t sensitivity;   // 10 - 300 (default 100)
 };
 
+struct GamepadPacket {
+    uint8_t magic;         // 0x03 for gamepad state
+    uint16_t wButtons;
+    uint8_t bLeftTrigger;
+    uint8_t bRightTrigger;
+    int16_t sThumbLX;
+    int16_t sThumbLY;
+    int16_t sThumbRX;
+    int16_t sThumbRY;
+};
+
 static volatile float g_gyro_pitch_delta = 0.0f;
 static volatile float g_gyro_yaw_delta = 0.0f;
 static volatile uint8_t g_gyro_mode = 0;
 static volatile float g_gyro_sensitivity = 1.0f;
 static volatile bool g_aim_trigger_active = false;
+
+static XINPUT_STATE g_live_udp_gamepad_state = {0};
+static volatile DWORD g_last_udp_packet_time = 0;
 
 // Function pointers for original XInput functions
 typedef DWORD (WINAPI *XInputGetState_t)(DWORD, XINPUT_STATE*);
@@ -67,56 +81,64 @@ static void InjectMouseDelta(int dx, int dy) {
     SendInput(1, &input, sizeof(INPUT));
 }
 
-static DWORD WINAPI GyroReceiverThread(LPVOID lpParam) {
+static DWORD WINAPI UDPReceiverThread(LPVOID lpParam) {
     sockaddr_in bind_addr;
     bind_addr.sin_family = AF_INET;
     bind_addr.sin_port = htons(24681);
     bind_addr.sin_addr.s_addr = INADDR_ANY;
 
-    udp_gyro_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (udp_gyro_socket == INVALID_SOCKET) return 0;
+    udp_receiver_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (udp_receiver_socket == INVALID_SOCKET) return 0;
 
     DWORD timeout = 20;
-    setsockopt(udp_gyro_socket, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
+    setsockopt(udp_receiver_socket, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
 
-    if (bind(udp_gyro_socket, (sockaddr*)&bind_addr, sizeof(bind_addr)) != 0) {
-        closesocket(udp_gyro_socket);
-        udp_gyro_socket = INVALID_SOCKET;
+    if (bind(udp_receiver_socket, (sockaddr*)&bind_addr, sizeof(bind_addr)) != 0) {
+        closesocket(udp_receiver_socket);
+        udp_receiver_socket = INVALID_SOCKET;
         return 0;
     }
 
-    g_gyro_running = true;
-    uint8_t buffer[64];
+    g_receiver_running = true;
+    uint8_t buffer[128];
 
-    while (g_gyro_running) {
-        int bytes = recv(udp_gyro_socket, (char*)buffer, sizeof(buffer), 0);
-        if (bytes >= (int)sizeof(GyroPacket)) {
+    while (g_receiver_running) {
+        int bytes = recv(udp_receiver_socket, (char*)buffer, sizeof(buffer), 0);
+        if (bytes >= (int)sizeof(GyroPacket) && buffer[0] == 0x02) {
             GyroPacket* p = (GyroPacket*)buffer;
-            if (p->magic == 0x02) {
-                g_gyro_mode = p->mode;
-                g_gyro_sensitivity = (float)p->sensitivity / 100.0f;
-                float pitch = ((float)p->pitch_rate / 100.0f) * g_gyro_sensitivity;
-                float yaw = ((float)p->yaw_rate / 100.0f) * g_gyro_sensitivity;
+            g_gyro_mode = p->mode;
+            g_gyro_sensitivity = (float)p->sensitivity / 100.0f;
+            float pitch = ((float)p->pitch_rate / 100.0f) * g_gyro_sensitivity;
+            float yaw = ((float)p->yaw_rate / 100.0f) * g_gyro_sensitivity;
 
-                g_gyro_pitch_delta = pitch;
-                g_gyro_yaw_delta = yaw;
+            g_gyro_pitch_delta = pitch;
+            g_gyro_yaw_delta = yaw;
 
-                // Mode 2: 1:1 True Mouse-Delta Aiming when aiming (L2)
-                // Mode 3: 1:1 True Mouse-Delta Aiming Always
-                if ((g_gyro_mode == 2 && g_aim_trigger_active) || g_gyro_mode == 3) {
-                    // Yaw controls horizontal (X), Pitch controls vertical (Y)
-                    // Invert pitch for natural camera tilt
-                    int m_dx = (int)(-yaw * 2.8f);
-                    int m_dy = (int)(-pitch * 2.8f);
-                    InjectMouseDelta(m_dx, m_dy);
-                }
+            if ((g_gyro_mode == 2 && g_aim_trigger_active) || g_gyro_mode == 3) {
+                int m_dx = (int)(-yaw * 2.8f);
+                int m_dy = (int)(-pitch * 2.8f);
+                InjectMouseDelta(m_dx, m_dy);
             }
+        }
+        else if (bytes >= (int)sizeof(GamepadPacket) && buffer[0] == 0x03) {
+            GamepadPacket* gp = (GamepadPacket*)buffer;
+            EnterCriticalSection(&init_lock);
+            g_live_udp_gamepad_state.dwPacketNumber++;
+            g_live_udp_gamepad_state.Gamepad.wButtons = gp->wButtons;
+            g_live_udp_gamepad_state.Gamepad.bLeftTrigger = gp->bLeftTrigger;
+            g_live_udp_gamepad_state.Gamepad.bRightTrigger = gp->bRightTrigger;
+            g_live_udp_gamepad_state.Gamepad.sThumbLX = gp->sThumbLX;
+            g_live_udp_gamepad_state.Gamepad.sThumbLY = gp->sThumbLY;
+            g_live_udp_gamepad_state.Gamepad.sThumbRX = gp->sThumbRX;
+            g_live_udp_gamepad_state.Gamepad.sThumbRY = gp->sThumbRY;
+            g_last_udp_packet_time = GetTickCount();
+            LeaveCriticalSection(&init_lock);
         }
     }
 
-    if (udp_gyro_socket != INVALID_SOCKET) {
-        closesocket(udp_gyro_socket);
-        udp_gyro_socket = INVALID_SOCKET;
+    if (udp_receiver_socket != INVALID_SOCKET) {
+        closesocket(udp_receiver_socket);
+        udp_receiver_socket = INVALID_SOCKET;
     }
     return 0;
 }
@@ -130,7 +152,7 @@ static void InitUDP() {
         rumble_server_addr.sin_port = htons(24680);
         rumble_server_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
 
-        hGyroThread = CreateThread(NULL, 0, GyroReceiverThread, NULL, 0, NULL);
+        hReceiverThread = CreateThread(NULL, 0, UDPReceiverThread, NULL, 0, NULL);
         g_udp_initialized = true;
     }
 }
@@ -195,7 +217,7 @@ static void SanitizeAndBlendGamepadState(XINPUT_GAMEPAD* pGamepad) {
         pGamepad->sThumbLY = 0;
     }
 
-    // 2. Right Thumbstick deadzone & anti-spin / anti-sky look filtering
+    // 2. Right Thumbstick deadzone & anti-spin filtering
     float rx = (float)pGamepad->sThumbRX;
     float ry = (float)pGamepad->sThumbRY;
     float rMag = sqrtf(rx * rx + ry * ry);
@@ -239,25 +261,39 @@ static void SanitizeAndBlendGamepadState(XINPUT_GAMEPAD* pGamepad) {
 extern "C" {
 
 __declspec(dllexport) DWORD WINAPI XInputGetState(DWORD dwUserIndex, XINPUT_STATE* pState) {
+    if (dwUserIndex != 0) return ERROR_DEVICE_NOT_CONNECTED;
     LoadOriginalDll();
+    
+    // First try original Wine XInput
     if (orig_XInputGetState && orig_XInputGetState != (XInputGetState_t)XInputGetState) {
         DWORD result = orig_XInputGetState(dwUserIndex, pState);
         if (result == ERROR_SUCCESS && pState) {
             SanitizeAndBlendGamepadState(&pState->Gamepad);
+            return ERROR_SUCCESS;
         }
-        return result;
     }
+    
+    // Direct UDP Gamepad Bridge from macOS DS4Link driver
+    if (pState && (GetTickCount() - g_last_udp_packet_time < 3000)) {
+        EnterCriticalSection(&init_lock);
+        *pState = g_live_udp_gamepad_state;
+        LeaveCriticalSection(&init_lock);
+        SanitizeAndBlendGamepadState(&pState->Gamepad);
+        return ERROR_SUCCESS;
+    }
+
     return ERROR_DEVICE_NOT_CONNECTED;
 }
 
 __declspec(dllexport) DWORD WINAPI XInputGetStateEx(DWORD dwUserIndex, XINPUT_STATE* pState) {
+    if (dwUserIndex != 0) return ERROR_DEVICE_NOT_CONNECTED;
     LoadOriginalDll();
     if (orig_XInputGetStateEx && orig_XInputGetStateEx != (XInputGetStateEx_t)XInputGetStateEx) {
         DWORD result = orig_XInputGetStateEx(dwUserIndex, pState);
         if (result == ERROR_SUCCESS && pState) {
             SanitizeAndBlendGamepadState(&pState->Gamepad);
+            return ERROR_SUCCESS;
         }
-        return result;
     }
     return XInputGetState(dwUserIndex, pState);
 }
@@ -276,9 +312,21 @@ __declspec(dllexport) DWORD WINAPI XInputSetState(DWORD dwUserIndex, XINPUT_VIBR
 }
 
 __declspec(dllexport) DWORD WINAPI XInputGetCapabilities(DWORD dwUserIndex, DWORD dwFlags, XINPUT_CAPABILITIES* pCapabilities) {
-    LoadOriginalDll();
-    if (orig_XInputGetCapabilities && orig_XInputGetCapabilities != (XInputGetCapabilities_t)XInputGetCapabilities) {
-        return orig_XInputGetCapabilities(dwUserIndex, dwFlags, pCapabilities);
+    if (dwUserIndex != 0) return ERROR_DEVICE_NOT_CONNECTED;
+    if (pCapabilities) {
+        pCapabilities->Type = XINPUT_DEVTYPE_GAMEPAD;
+        pCapabilities->SubType = XINPUT_DEVSUBTYPE_GAMEPAD;
+        pCapabilities->Flags = 0;
+        pCapabilities->Gamepad.wButtons = 0xFFFF;
+        pCapabilities->Gamepad.bLeftTrigger = 255;
+        pCapabilities->Gamepad.bRightTrigger = 255;
+        pCapabilities->Gamepad.sThumbLX = 32767;
+        pCapabilities->Gamepad.sThumbLY = 32767;
+        pCapabilities->Gamepad.sThumbRX = 32767;
+        pCapabilities->Gamepad.sThumbRY = 32767;
+        pCapabilities->Vibration.wLeftMotorSpeed = 65535;
+        pCapabilities->Vibration.wRightMotorSpeed = 65535;
+        return ERROR_SUCCESS;
     }
     return ERROR_DEVICE_NOT_CONNECTED;
 }
@@ -291,18 +339,11 @@ __declspec(dllexport) void WINAPI XInputEnable(BOOL enable) {
 }
 
 __declspec(dllexport) DWORD WINAPI XInputGetDSoundAudioDeviceGuids(DWORD dwUserIndex, GUID* pDSoundRenderGuid, GUID* pDSoundCaptureGuid) {
-    LoadOriginalDll();
-    if (orig_XInputGetDSoundAudioDeviceGuids) {
-        return orig_XInputGetDSoundAudioDeviceGuids(dwUserIndex, pDSoundRenderGuid, pDSoundCaptureGuid);
-    }
     return ERROR_DEVICE_NOT_CONNECTED;
 }
 
 __declspec(dllexport) DWORD WINAPI XInputGetBatteryInformation(DWORD dwUserIndex, BYTE devType, XINPUT_BATTERY_INFORMATION* pBatteryInformation) {
-    LoadOriginalDll();
-    if (orig_XInputGetBatteryInformation) {
-        return orig_XInputGetBatteryInformation(dwUserIndex, devType, pBatteryInformation);
-    }
+    if (dwUserIndex != 0) return ERROR_DEVICE_NOT_CONNECTED;
     if (pBatteryInformation) {
         pBatteryInformation->BatteryType = BATTERY_TYPE_ALKALINE;
         pBatteryInformation->BatteryLevel = BATTERY_LEVEL_FULL;
@@ -312,18 +353,10 @@ __declspec(dllexport) DWORD WINAPI XInputGetBatteryInformation(DWORD dwUserIndex
 }
 
 __declspec(dllexport) DWORD WINAPI XInputGetKeystroke(DWORD dwUserIndex, DWORD dwReserved, PXINPUT_KEYSTROKE pKeystroke) {
-    LoadOriginalDll();
-    if (orig_XInputGetKeystroke) {
-        return orig_XInputGetKeystroke(dwUserIndex, dwReserved, pKeystroke);
-    }
     return ERROR_EMPTY;
 }
 
 __declspec(dllexport) DWORD WINAPI XInputGetAudioDeviceIds(DWORD dwUserIndex, LPWSTR pRenderDeviceId, UINT* pRenderCount, LPWSTR pCaptureDeviceId, UINT* pCaptureCount) {
-    LoadOriginalDll();
-    if (orig_XInputGetAudioDeviceIds) {
-        return orig_XInputGetAudioDeviceIds(dwUserIndex, pRenderDeviceId, pRenderCount, pCaptureDeviceId, pCaptureCount);
-    }
     return ERROR_DEVICE_NOT_CONNECTED;
 }
 
@@ -337,10 +370,10 @@ __declspec(dllexport) BOOL WINAPI DllMain(HMODULE hModule, DWORD ul_reason_for_c
             break;
         case DLL_PROCESS_DETACH:
             DeleteCriticalSection(&init_lock);
-            g_gyro_running = false;
-            if (udp_gyro_socket != INVALID_SOCKET) {
-                closesocket(udp_gyro_socket);
-                udp_gyro_socket = INVALID_SOCKET;
+            g_receiver_running = false;
+            if (udp_receiver_socket != INVALID_SOCKET) {
+                closesocket(udp_receiver_socket);
+                udp_receiver_socket = INVALID_SOCKET;
             }
             if (udp_rumble_socket != INVALID_SOCKET) {
                 closesocket(udp_rumble_socket);

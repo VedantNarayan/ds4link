@@ -227,18 +227,16 @@ func autoPatchAllBottles() {
         if let xinput64Src = Bundle.main.path(forResource: "xinput1_4_64", ofType: "dll") ?? Bundle.main.path(forResource: "xinput1_4", ofType: "dll") {
             if FileManager.default.fileExists(atPath: sys32Dir.path) {
                 let dest = sys32Dir.appendingPathComponent("xinput1_4.dll")
-                if !FileManager.default.fileExists(atPath: dest.path) {
-                    try? FileManager.default.copyItem(atPath: xinput64Src, toPath: dest.path)
-                }
+                try? FileManager.default.removeItem(at: dest)
+                try? FileManager.default.copyItem(atPath: xinput64Src, toPath: dest.path)
             }
         }
         
-        if let xinput32Src = Bundle.main.path(forResource: "xinput1_4_32", ofType: "dll") ?? Bundle.main.path(forResource: "xinput1_4", ofType: "dll") {
-            if FileManager.default.fileExists(atPath: syswowDir.path) {
-                let dest = syswowDir.appendingPathComponent("xinput1_4.dll")
-                if !FileManager.default.fileExists(atPath: dest.path) {
-                    try? FileManager.default.copyItem(atPath: xinput32Src, toPath: dest.path)
-                }
+        if let dinput64Src = Bundle.main.path(forResource: "dinput8_64", ofType: "dll") ?? Bundle.main.path(forResource: "dinput8", ofType: "dll") {
+            if FileManager.default.fileExists(atPath: sys32Dir.path) {
+                let dest = sys32Dir.appendingPathComponent("dinput8.dll")
+                try? FileManager.default.removeItem(at: dest)
+                try? FileManager.default.copyItem(atPath: dinput64Src, toPath: dest.path)
             }
         }
         
@@ -252,7 +250,7 @@ func autoPatchAllBottles() {
     }
 }
 
-// MARK: - Autonomous Game Watcher & Auto-Injector (Cross-Bottle Resolver)
+// MARK: - Autonomous Game Watcher & Auto-Injector
 class GameWatcher {
     static let shared = GameWatcher()
     private var timer: DispatchSourceTimer?
@@ -334,33 +332,20 @@ class GameWatcher {
         let dinputDest = targetFolder.appendingPathComponent("dinput8.dll")
         
         if let xinputSrc = Bundle.main.path(forResource: "xinput1_4_64", ofType: "dll") ?? Bundle.main.path(forResource: "xinput1_4", ofType: "dll") {
-            if !FileManager.default.fileExists(atPath: xinputDest.path) {
-                try? FileManager.default.copyItem(atPath: xinputSrc, toPath: xinputDest.path)
-                writeLog("[Auto-Hook] Injected xinput1_4.dll proxy into: \(targetFolder.lastPathComponent)")
-            }
+            try? FileManager.default.removeItem(at: xinputDest)
+            try? FileManager.default.copyItem(atPath: xinputSrc, toPath: xinputDest.path)
+            writeLog("[Auto-Hook] Injected xinput1_4.dll proxy into: \(targetFolder.lastPathComponent)")
         }
         
         if let dinputSrc = Bundle.main.path(forResource: "dinput8_64", ofType: "dll") ?? Bundle.main.path(forResource: "dinput8_32", ofType: "dll") {
-            if !FileManager.default.fileExists(atPath: dinputDest.path) {
-                try? FileManager.default.copyItem(atPath: dinputSrc, toPath: dinputDest.path)
-                writeLog("[Auto-Hook] Injected dinput8.dll proxy into: \(targetFolder.lastPathComponent)")
-            }
-        }
-        
-        let steamApiDest = targetFolder.appendingPathComponent("steam_api64.dll")
-        let steamApiOrig = targetFolder.appendingPathComponent("steam_api64_original.dll")
-        if let steamSrc = Bundle.main.path(forResource: "steam_api64", ofType: "dll") {
-            if FileManager.default.fileExists(atPath: steamApiDest.path) && !FileManager.default.fileExists(atPath: steamApiOrig.path) {
-                try? FileManager.default.copyItem(atPath: steamApiDest.path, toPath: steamApiOrig.path)
-                try? FileManager.default.removeItem(at: steamApiDest)
-                try? FileManager.default.copyItem(atPath: steamSrc, toPath: steamApiDest.path)
-                writeLog("[Auto-Hook] Injected SteamAPI proxy into: \(targetFolder.lastPathComponent)")
-            }
+            try? FileManager.default.removeItem(at: dinputDest)
+            try? FileManager.default.copyItem(atPath: dinputSrc, toPath: dinputDest.path)
+            writeLog("[Auto-Hook] Injected dinput8.dll proxy into: \(targetFolder.lastPathComponent)")
         }
     }
 }
 
-// MARK: - High-Rate Gyroscope Engine
+// MARK: - High-Rate Gyroscope & Live Gamepad Bridge Engine
 class GyroEngine {
     static let shared = GyroEngine()
     private var gyroSocket: Int32 = -1
@@ -403,18 +388,63 @@ class GyroEngine {
         let t = DispatchSource.makeTimerSource(queue: queue)
         t.schedule(deadline: .now(), repeating: .milliseconds(8))
         t.setEventHandler { [weak self] in
-            self?.pollAndStreamGyro()
+            self?.pollAndStreamController()
         }
         t.resume()
         self.timer = t
         self.isStreaming = true
-        writeLog("[Gyro] 120Hz 1:1 Precision Gyro Engine active.")
+        writeLog("[Gyro] 120Hz 1:1 Precision Gyro & Live Gamepad Engine active.")
     }
     
-    private func pollAndStreamGyro() {
-        guard gyroMode > 0 else { return }
-        guard let controller = GCController.controllers().first, let motion = controller.motion else { return }
+    private func pollAndStreamController() {
+        guard let controller = GCController.controllers().first else { return }
         
+        // 1. Stream Live Gamepad State to XInput Proxy (Port 24681, Magic 0x03)
+        if let gp = controller.extendedGamepad {
+            var packet = [UInt8](repeating: 0, count: 13)
+            packet[0] = 0x03 // Magic for gamepad
+            
+            var buttons: UInt16 = 0
+            if gp.dpad.up.isPressed { buttons |= 0x0001 }
+            if gp.dpad.down.isPressed { buttons |= 0x0002 }
+            if gp.dpad.left.isPressed { buttons |= 0x0004 }
+            if gp.dpad.right.isPressed { buttons |= 0x0008 }
+            if gp.buttonMenu.isPressed { buttons |= 0x0010 } // Start / Options
+            if gp.buttonOptions?.isPressed == true { buttons |= 0x0020 } // Back / Share
+            if gp.leftThumbstickButton?.isPressed == true { buttons |= 0x0040 } // L3
+            if gp.rightThumbstickButton?.isPressed == true { buttons |= 0x0080 } // R3
+            if gp.leftShoulder.isPressed { buttons |= 0x0100 } // LB / L1
+            if gp.rightShoulder.isPressed { buttons |= 0x0200 } // RB / R1
+            if gp.buttonA.isPressed { buttons |= 0x1000 } // A / Cross
+            if gp.buttonB.isPressed { buttons |= 0x2000 } // B / Circle
+            if gp.buttonX.isPressed { buttons |= 0x4000 } // X / Square
+            if gp.buttonY.isPressed { buttons |= 0x8000 } // Y / Triangle
+            
+            withUnsafeBytes(of: buttons.littleEndian) { packet[1] = $0[0]; packet[2] = $0[1] }
+            packet[3] = UInt8(min(255, max(0, Int(gp.leftTrigger.value * 255.0))))
+            packet[4] = UInt8(min(255, max(0, Int(gp.rightTrigger.value * 255.0))))
+            
+            let lx = Int16(clamping: Int(gp.leftThumbstick.xAxis.value * 32767.0))
+            let ly = Int16(clamping: Int(gp.leftThumbstick.yAxis.value * 32767.0))
+            let rx = Int16(clamping: Int(gp.rightThumbstick.xAxis.value * 32767.0))
+            let ry = Int16(clamping: Int(gp.rightThumbstick.yAxis.value * 32767.0))
+            
+            withUnsafeBytes(of: lx.littleEndian) { packet[5] = $0[0]; packet[6] = $0[1] }
+            withUnsafeBytes(of: ly.littleEndian) { packet[7] = $0[0]; packet[8] = $0[1] }
+            withUnsafeBytes(of: rx.littleEndian) { packet[9] = $0[0]; packet[10] = $0[1] }
+            withUnsafeBytes(of: ry.littleEndian) { packet[11] = $0[0]; packet[12] = $0[1] }
+            
+            if gyroSocket >= 0 {
+                _ = withUnsafePointer(to: &gyroAddr) {
+                    $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                        sendto(gyroSocket, packet, packet.count, 0, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+                    }
+                }
+            }
+        }
+        
+        // 2. Stream Gyro (Port 24681, Magic 0x02)
+        guard gyroMode > 0, let motion = controller.motion else { return }
         let rot = motion.rotationRate
         let pitchRate = Int16(clamping: Int(rot.x * 57.2958 * 100.0))
         let yawRate = Int16(clamping: Int(rot.y * 57.2958 * 100.0))
@@ -426,9 +456,7 @@ class GyroEngine {
         
         if deltaPitch < 8 && deltaYaw < 8 && deltaRoll < 8 && abs(pitchRate) < 15 && abs(yawRate) < 15 {
             idleCount += 1
-            if idleCount > 2 {
-                return
-            }
+            if idleCount > 2 { return }
         } else {
             idleCount = 0
         }

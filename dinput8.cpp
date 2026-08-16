@@ -1,39 +1,14 @@
+#define INITGUID
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#define DIRECTINPUT_VERSION 0x0800
 #include <dinput.h>
 #include <stdio.h>
 
 #pragma comment(lib, "ws2_32.lib")
 
 static HMODULE hOrigDInputDll = NULL;
-static SOCKET udp_socket = INVALID_SOCKET;
-static sockaddr_in server_addr;
-static bool g_udp_initialized = false;
-
-static void InitUDP() {
-    if (g_udp_initialized) return;
-    WSADATA wsa;
-    if (WSAStartup(MAKEWORD(2, 2), &wsa) == 0) {
-        udp_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-        server_addr.sin_family = AF_INET;
-        server_addr.sin_port = htons(24680);
-        server_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
-        g_udp_initialized = true;
-    }
-}
-
-static void SendRumbleUDP(BYTE left, BYTE right) {
-    if (!g_udp_initialized) InitUDP();
-    if (udp_socket != INVALID_SOCKET) {
-        unsigned char packet[3];
-        packet[0] = 0x01;
-        packet[1] = left;
-        packet[2] = right;
-        sendto(udp_socket, (const char*)packet, 3, 0, (sockaddr*)&server_addr, sizeof(server_addr));
-    }
-}
-
 typedef HRESULT (WINAPI *DirectInput8Create_t)(HINSTANCE, DWORD, REFIID, LPVOID*, LPUNKNOWN);
 static DirectInput8Create_t orig_DirectInput8Create = NULL;
 
@@ -49,12 +24,78 @@ static void LoadOriginalDll() {
     }
 }
 
+// Wrapper for IDirectInput8W to filter out raw Sony devices and force games to use XInput
+class WrappedDirectInput8W : public IDirectInput8W {
+public:
+    IDirectInput8W* m_pOrig;
+    LONG m_refCount;
+
+    WrappedDirectInput8W(IDirectInput8W* pOrig) : m_pOrig(pOrig), m_refCount(1) {}
+
+    /*** IUnknown methods ***/
+    STDMETHOD(QueryInterface)(REFIID riid, LPVOID* ppvObj) {
+        return m_pOrig->QueryInterface(riid, ppvObj);
+    }
+    STDMETHOD_(ULONG, AddRef)() {
+        return InterlockedIncrement(&m_refCount);
+    }
+    STDMETHOD_(ULONG, Release)() {
+        ULONG count = InterlockedDecrement(&m_refCount);
+        if (count == 0) {
+            m_pOrig->Release();
+            delete this;
+            return 0;
+        }
+        return count;
+    }
+
+    /*** IDirectInput8W methods ***/
+    STDMETHOD(CreateDevice)(REFGUID rguid, LPDIRECTINPUTDEVICE8W* lplpDirectInputDevice, LPUNKNOWN pUnkOuter) {
+        return m_pOrig->CreateDevice(rguid, lplpDirectInputDevice, pUnkOuter);
+    }
+
+    // Intercept EnumDevices: Return DI_OK with 0 devices to force games to use standard XInput
+    STDMETHOD(EnumDevices)(DWORD dwDevType, LPDIENUMDEVICESCALLBACKW lpCallback, LPVOID pvRef, DWORD dwFlags) {
+        // Suppress DirectInput joystick enumeration so games don't try to use broken LibScePad raw HID
+        if (dwDevType == DI8DEVCLASS_GAMECTRL || dwDevType == DI8DEVCLASS_ALL || dwDevType == 0) {
+            return DI_OK; // Return 0 devices
+        }
+        return m_pOrig->EnumDevices(dwDevType, lpCallback, pvRef, dwFlags);
+    }
+
+    STDMETHOD(GetDeviceStatus)(REFGUID rguid) {
+        return m_pOrig->GetDeviceStatus(rguid);
+    }
+    STDMETHOD(RunControlPanel)(HWND hwndOwner, DWORD dwFlags) {
+        return m_pOrig->RunControlPanel(hwndOwner, dwFlags);
+    }
+    STDMETHOD(Initialize)(HINSTANCE hinst, DWORD dwVersion) {
+        return m_pOrig->Initialize(hinst, dwVersion);
+    }
+    STDMETHOD(FindDevice)(REFGUID rguidClass, LPCWSTR pwszName, LPGUID pguidInstance) {
+        return m_pOrig->FindDevice(rguidClass, pwszName, pguidInstance);
+    }
+    STDMETHOD(EnumDevicesBySemantics)(LPCWSTR pwszUserName, LPDIACTIONFORMATW lpdiActionFormat, LPDIENUMDEVICESBYSEMANTICSCBW lpCallback, LPVOID pvRef, DWORD dwFlags) {
+        return DI_OK;
+    }
+    STDMETHOD(ConfigureDevices)(LPDICONFIGUREDEVICESCALLBACK lpdiCallback, LPDICONFIGUREDEVICESPARAMSW lpdiCDParams, DWORD dwFlags, LPVOID pvRef) {
+        return m_pOrig->ConfigureDevices(lpdiCallback, lpdiCDParams, dwFlags, pvRef);
+    }
+};
+
 extern "C" {
 
 __declspec(dllexport) HRESULT WINAPI DirectInput8Create(HINSTANCE hinst, DWORD dwVersion, REFIID riidltf, LPVOID* ppvOut, LPUNKNOWN punkOuter) {
     LoadOriginalDll();
     if (orig_DirectInput8Create) {
-        return orig_DirectInput8Create(hinst, dwVersion, riidltf, ppvOut, punkOuter);
+        HRESULT hr = orig_DirectInput8Create(hinst, dwVersion, riidltf, ppvOut, punkOuter);
+        if (SUCCEEDED(hr) && ppvOut && *ppvOut) {
+            if (IsEqualIID(riidltf, IID_IDirectInput8W)) {
+                IDirectInput8W* pOrig = (IDirectInput8W*)*ppvOut;
+                *ppvOut = new WrappedDirectInput8W(pOrig);
+            }
+        }
+        return hr;
     }
     return DIERR_NOTINITIALIZED;
 }
@@ -82,7 +123,6 @@ __declspec(dllexport) HRESULT WINAPI DllUnregisterServer(void) {
 __declspec(dllexport) BOOL WINAPI DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
     if (ul_reason_for_call == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hModule);
-        InitUDP();
     }
     return TRUE;
 }
