@@ -43,8 +43,8 @@ struct EngineProfile {
 
 class EngineProfileManager {
     static let shared = EngineProfileManager()
-    private(set) var activeEngine: GameEngineType = .standardDirectX
-    private(set) var activeGameName: String = "Universal Game"
+    private(set) var activeEngine: GameEngineType = .sonyFirstParty
+    private(set) var activeGameName: String = "Horizon Forbidden West"
     
     func detectAndApplyProfile(for exeName: String, gameFolder: URL) {
         let nameLower = exeName.lowercased()
@@ -53,7 +53,9 @@ class EngineProfileManager {
         var profile: EngineProfile
         var cleanTitle = exeName.replacingOccurrences(of: ".exe", with: "").replacingOccurrences(of: ".EXE", with: "")
         
-        if cleanTitle.lowercased().contains("wewerehere") {
+        if cleanTitle.lowercased().contains("horizon") || folderName.contains("horizon") {
+            cleanTitle = "Horizon Forbidden West"
+        } else if cleanTitle.lowercased().contains("wewerehere") {
             cleanTitle = "We Were Here Together"
         }
         
@@ -67,7 +69,7 @@ class EngineProfileManager {
         // 2. Sony First-Party Games
         else if nameLower.contains("spider") || nameLower.contains("miles") || nameLower.contains("horizon") ||
                 nameLower.contains("godofwar") || nameLower.contains("tsushima") || nameLower.contains("tlou") ||
-                nameLower.contains("uncharted") || nameLower.contains("returnal") {
+                nameLower.contains("uncharted") || nameLower.contains("returnal") || folderName.contains("horizon") {
             profile = EngineProfile(engine: .sonyFirstParty, defaultGyroMode: 2, enableTouchpadToMap: true, impulseTriggerHaptics: true, isolateDInput: true)
             activeGameName = cleanTitle.capitalized
         }
@@ -222,7 +224,7 @@ func autoPatchAllBottles() {
         let sys32Dir = bottleDir.appendingPathComponent("drive_c/windows/system32")
         let syswowDir = bottleDir.appendingPathComponent("drive_c/windows/syswow64")
         
-        if let xinput64Src = Bundle.main.path(forResource: "xinput1_4_64", ofType: "dll") {
+        if let xinput64Src = Bundle.main.path(forResource: "xinput1_4_64", ofType: "dll") ?? Bundle.main.path(forResource: "xinput1_4", ofType: "dll") {
             if FileManager.default.fileExists(atPath: sys32Dir.path) {
                 let dest = sys32Dir.appendingPathComponent("xinput1_4.dll")
                 if !FileManager.default.fileExists(atPath: dest.path) {
@@ -231,7 +233,7 @@ func autoPatchAllBottles() {
             }
         }
         
-        if let xinput32Src = Bundle.main.path(forResource: "xinput1_4_32", ofType: "dll") {
+        if let xinput32Src = Bundle.main.path(forResource: "xinput1_4_32", ofType: "dll") ?? Bundle.main.path(forResource: "xinput1_4", ofType: "dll") {
             if FileManager.default.fileExists(atPath: syswowDir.path) {
                 let dest = syswowDir.appendingPathComponent("xinput1_4.dll")
                 if !FileManager.default.fileExists(atPath: dest.path) {
@@ -239,10 +241,18 @@ func autoPatchAllBottles() {
                 }
             }
         }
+        
+        // 4. Pre-Scan and Inject all installed Steam games in bottle
+        let steamCommon = bottleDir.appendingPathComponent("drive_c/Program Files (x86)/Steam/steamapps/common")
+        if let games = try? FileManager.default.contentsOfDirectory(at: steamCommon, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) {
+            for g in games {
+                GameWatcher.shared.injectProxyDLLs(into: g)
+            }
+        }
     }
 }
 
-// MARK: - Autonomous Game Watcher & Auto-Injector
+// MARK: - Autonomous Game Watcher & Auto-Injector (Cross-Bottle Resolver)
 class GameWatcher {
     static let shared = GameWatcher()
     private var timer: DispatchSourceTimer?
@@ -275,29 +285,45 @@ class GameWatcher {
         let lines = output.components(separatedBy: .newlines)
         for line in lines {
             if (line.contains(".exe") || line.contains(".EXE")) &&
-               (line.contains("wine") || line.contains("CrossOver") || line.contains("Heroic") || line.contains("Whisky") || line.contains("Steam")) {
+               (line.contains("wine") || line.contains("CrossOver") || line.contains("Heroic") || line.contains("Whisky") || line.contains("Steam") || line.contains("Horizon")) {
                 extractAndInjectGame(from: line)
             }
         }
     }
     
     private func extractAndInjectGame(from commandLine: String) {
+        let bottles = getAllBottlePaths()
         let components = commandLine.components(separatedBy: " ")
         for comp in components {
-            if comp.lowercased().hasSuffix(".exe") || comp.lowercased().contains(".exe\"") {
+            if comp.lowercased().hasSuffix(".exe") || comp.lowercased().contains(".exe\"") || comp.lowercased().contains(".exe") {
                 var cleanPath = comp.replacingOccurrences(of: "\"", with: "")
+                
+                // Case 1: Z: or Direct Mac Path
                 if cleanPath.starts(with: "Z:") || cleanPath.starts(with: "z:") {
                     cleanPath = String(cleanPath.dropFirst(2)).replacingOccurrences(of: "\\", with: "/")
+                    let fileURL = URL(fileURLWithPath: cleanPath)
+                    let gameDir = fileURL.deletingLastPathComponent()
+                    let dirPath = gameDir.path
+                    if !processedDirs.contains(dirPath) && FileManager.default.fileExists(atPath: dirPath) {
+                        processedDirs.insert(dirPath)
+                        injectProxyDLLs(into: gameDir)
+                        EngineProfileManager.shared.detectAndApplyProfile(for: fileURL.lastPathComponent, gameFolder: gameDir)
+                    }
                 }
-                
-                let fileURL = URL(fileURLWithPath: cleanPath)
-                let gameDir = fileURL.deletingLastPathComponent()
-                let dirPath = gameDir.path
-                
-                if !processedDirs.contains(dirPath) && FileManager.default.fileExists(atPath: dirPath) {
-                    processedDirs.insert(dirPath)
-                    injectProxyDLLs(into: gameDir)
-                    EngineProfileManager.shared.detectAndApplyProfile(for: fileURL.lastPathComponent, gameFolder: gameDir)
+                // Case 2: Windows C: Path (Map to Bottles)
+                else if cleanPath.starts(with: "C:") || cleanPath.starts(with: "c:") {
+                    let subPath = String(cleanPath.dropFirst(2)).replacingOccurrences(of: "\\", with: "/")
+                    for b in bottles {
+                        let bottleDir = FileManager.default.fileExists(atPath: b.appendingPathComponent("system.reg").path) ? b : b.appendingPathComponent("pfx")
+                        let resolvedURL = bottleDir.appendingPathComponent("drive_c").appendingPathComponent(subPath)
+                        let gameDir = resolvedURL.deletingLastPathComponent()
+                        let dirPath = gameDir.path
+                        if FileManager.default.fileExists(atPath: dirPath) && !processedDirs.contains(dirPath) {
+                            processedDirs.insert(dirPath)
+                            injectProxyDLLs(into: gameDir)
+                            EngineProfileManager.shared.detectAndApplyProfile(for: resolvedURL.lastPathComponent, gameFolder: gameDir)
+                        }
+                    }
                 }
             }
         }
@@ -709,7 +735,7 @@ class BSDUDPServer {
     }
 }
 
-// MARK: - Built-in Comprehensive Help, Guide & FAQ Center (Rich Typography)
+// MARK: - Built-in Comprehensive Help, Guide & FAQ Center
 class HelpWindowController: NSWindowController {
     static var shared: HelpWindowController?
     
@@ -820,17 +846,18 @@ class HelpViewController: NSViewController, NSTableViewDelegate, NSTableViewData
             content: """
             # 🛠️ Troubleshooting & Frequently Asked Questions
             
+            ### Q: Why is the controller working in Steam Big Picture, but DEAD in the game?
+            **A:** Steam Input intercepts gamepads and tries to create a virtual Xbox 360 driver. In Wine / CrossOver, Windows kernel drivers cannot load, so Steam delivers 0 inputs to the game!
+            **Solution:** Right-click the game in Steam -> **Properties** -> **Controller** -> change to **"Disable Steam Input"**. The game will immediately receive 100% native controls and DS4Link haptics!
+            
             ### Q: My camera keeps spinning or looking at the sky.
-            **A:** DS4Link features built-in radial magnitude deadzones and trigger threshold clamping to permanently eliminate stick drift. If an issue occurs, re-center the controller and click **Re-Scan Bottles** in the menu bar.
+            **A:** DS4Link features built-in radial magnitude deadzones and trigger threshold clamping to permanently eliminate stick drift. If an issue occurs, re-center the controller and click **Re-Scan** in the menu bar.
             
             ### Q: Does the controller speaker work over Bluetooth?
             **A:** Over Bluetooth, macOS connects game controllers strictly under the Gamepad HID profile, which disables the proprietary Sony wireless audio stream. To use the controller's built-in speaker, connect via USB cable.
             
             ### Q: Will I see PlayStation (×, ○, □, △) button icons in games?
             **A:** In modern titles and PlayStation PC ports, yes (or selectable in game settings). Older Windows games from 2005–2015 only have Xbox (A, B, X, Y) textures drawn into their files, but your DualShock 4 buttons map 1:1 to the correct physical positions.
-            
-            ### Q: The game says "Playing" in Heroic/CrossOver but won't open.
-            **A:** A previous crashed game may have left a zombie `wineserver` process. Quit the game launcher, open Terminal, run `killall wineserver`, and restart the game.
             """
         )
     ]
@@ -949,7 +976,6 @@ class HelpViewController: NSViewController, NSTableViewDelegate, NSTableViewData
         let topic = topics[index]
         let attr = NSMutableAttributedString()
         
-        // Paragraph Style with spacious line height and readability margins
         let bodyParagraph = NSMutableParagraphStyle()
         bodyParagraph.lineSpacing = 5.0
         bodyParagraph.paragraphSpacing = 8.0
