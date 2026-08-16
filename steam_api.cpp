@@ -1,10 +1,12 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#include <setupapi.h>
 #include <string>
 #include <cstdint>
 
 #pragma comment(lib, "ws2_32.lib")
+#pragma comment(lib, "setupapi.lib")
 
 // Globals
 HMODULE hOrigSteamApiDll = NULL;
@@ -12,14 +14,6 @@ HMODULE hMySelf = NULL;
 
 typedef void* (__cdecl *SteamInternal_FindOrCreateUserInterface_t)(int, const char*);
 SteamInternal_FindOrCreateUserInterface_t orig_SteamInternal_FindOrCreateUserInterface = NULL;
-
-// ISteamInput / ISteamController vtable hook types
-typedef void (__cdecl *SteamInputTriggerVibration_t)(void*, uint64_t, unsigned short, unsigned short);
-typedef void (__cdecl *SteamInputTriggerVibrationExtended_t)(void*, uint64_t, unsigned short, unsigned short, unsigned short, unsigned short);
-
-SteamInputTriggerVibration_t real_TriggerVibration = NULL;
-SteamInputTriggerVibrationExtended_t real_TriggerVibrationExtended = NULL;
-SteamInputTriggerVibration_t real_ControllerTriggerVibration = NULL;
 
 // UDP Client Socket
 SOCKET udp_socket = INVALID_SOCKET;
@@ -49,10 +43,120 @@ void InitUDP() {
     server_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
 }
 
+// Send rumble values to macOS CoreHaptics server via UDP
+static void SendRumbleUDP(BYTE left_motor, BYTE right_motor) {
+    unsigned char packet[3];
+    packet[0] = 0x01;
+    packet[1] = left_motor;
+    packet[2] = right_motor;
+    sendto(udp_socket, (const char*)packet, 3, 0, (sockaddr*)&server_addr, sizeof(server_addr));
+}
+
 // ============================================================================
-// RawInput Spoofing (Converts Sony VID 0x054C -> Microsoft VID 0x045E)
-// This permanently forces Sony Decima / PC ports to use standard XInput
-// instead of locking into broken Bluetooth LibScePad in Wine.
+// Direct SetupAPI DualShock 4 Synthesizer (VID 0x054C, PID 0x09CC with &IG_00)
+// This gives native PlayStation 4 button glyphs in Decima / Sony / Nixxes engines!
+// ============================================================================
+
+static const wchar_t g_VirtualXUSBPath[] = L"\\\\?\\hid#vid_054c&pid_09cc&ig_00#0000#{ec87f1e3-c13b-4100-b5f3-0ee462bd6b9f}";
+static const wchar_t g_VirtualHardwareId[] = L"USB\\VID_054C&PID_09CC&IG_00\0USB\\VID_054C&PID_09CC\0";
+static const wchar_t g_VirtualDeviceDesc[] = L"Wireless Controller";
+static const wchar_t g_VirtualInstanceId[] = L"USB\\VID_054C&PID_09CC&IG_00\\0000";
+static const GUID k_GUID_NULL = { 0, 0, 0, { 0, 0, 0, 0, 0, 0, 0, 0 } };
+
+BOOL WINAPI Hooked_SetupDiEnumDeviceInfo(HDEVINFO DeviceInfoSet, DWORD MemberIndex, PSP_DEVINFO_DATA DeviceInfoData) {
+    if (MemberIndex == 0 && DeviceInfoData) {
+        DeviceInfoData->cbSize = sizeof(SP_DEVINFO_DATA);
+        DeviceInfoData->ClassGuid = k_GUID_NULL;
+        DeviceInfoData->DevInst = 1;
+        DeviceInfoData->Reserved = 0x1337;
+        WriteLog("[SetupAPI Direct] SetupDiEnumDeviceInfo MemberIndex 0 -> Injected Virtual DualShock 4\n");
+        return TRUE;
+    }
+    SetLastError(ERROR_NO_MORE_ITEMS);
+    return FALSE;
+}
+
+BOOL WINAPI Hooked_SetupDiEnumDeviceInterfaces(HDEVINFO DeviceInfoSet, PSP_DEVINFO_DATA DeviceInfoData, const GUID* InterfaceClassGuid, DWORD MemberIndex, PSP_DEVICE_INTERFACE_DATA DeviceInterfaceData) {
+    if (MemberIndex == 0 && DeviceInterfaceData) {
+        DeviceInterfaceData->cbSize = sizeof(SP_DEVICE_INTERFACE_DATA);
+        DeviceInterfaceData->InterfaceClassGuid = InterfaceClassGuid ? *InterfaceClassGuid : k_GUID_NULL;
+        DeviceInterfaceData->Flags = SPINT_ACTIVE;
+        DeviceInterfaceData->Reserved = 0x1337;
+        WriteLog("[SetupAPI Direct] Injected Virtual DualShock 4 interface at MemberIndex 0\n");
+        return TRUE;
+    }
+    SetLastError(ERROR_NO_MORE_ITEMS);
+    return FALSE;
+}
+
+BOOL WINAPI Hooked_SetupDiGetDeviceInterfaceDetailW(HDEVINFO DeviceInfoSet, PSP_DEVICE_INTERFACE_DATA DeviceInterfaceData, PSP_DEVICE_INTERFACE_DETAIL_DATA_W DeviceInterfaceDetailData, DWORD DeviceInterfaceDetailDataSize, PDWORD RequiredSize, PSP_DEVINFO_DATA DeviceInfoData) {
+    DWORD needed = (DWORD)(sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W) + (wcslen(g_VirtualXUSBPath) + 1) * sizeof(wchar_t));
+    if (RequiredSize) *RequiredSize = needed;
+    
+    if (DeviceInterfaceDetailData && DeviceInterfaceDetailDataSize >= sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W)) {
+        wcscpy(DeviceInterfaceDetailData->DevicePath, g_VirtualXUSBPath);
+    }
+    
+    if (DeviceInfoData) {
+        DeviceInfoData->cbSize = sizeof(SP_DEVINFO_DATA);
+        DeviceInfoData->ClassGuid = k_GUID_NULL;
+        DeviceInfoData->DevInst = 1;
+        DeviceInfoData->Reserved = 0x1337;
+    }
+    WriteLog("[SetupAPI Direct] Provided Virtual DualShock 4 DevicePath: %ls\n", g_VirtualXUSBPath);
+    return TRUE;
+}
+
+BOOL WINAPI Hooked_SetupDiGetDeviceRegistryPropertyW(HDEVINFO DeviceInfoSet, PSP_DEVINFO_DATA DeviceInfoData, DWORD Property, PDWORD PropertyRegDataType, PBYTE PropertyBuffer, DWORD PropertyBufferSize, PDWORD RequiredSize) {
+    const wchar_t* pStr = NULL;
+    DWORD bytesNeeded = 0;
+    
+    if (Property == SPDRP_HARDWAREID) {
+        pStr = g_VirtualHardwareId;
+        bytesNeeded = sizeof(g_VirtualHardwareId);
+        if (PropertyRegDataType) *PropertyRegDataType = REG_MULTI_SZ;
+    } else {
+        pStr = g_VirtualDeviceDesc;
+        bytesNeeded = sizeof(g_VirtualDeviceDesc);
+        if (PropertyRegDataType) *PropertyRegDataType = REG_SZ;
+    }
+    
+    if (RequiredSize) *RequiredSize = bytesNeeded;
+    if (PropertyBuffer && PropertyBufferSize >= bytesNeeded) {
+        memcpy(PropertyBuffer, pStr, bytesNeeded);
+    }
+    WriteLog("[SetupAPI Direct] Provided Property %d: %ls\n", Property, pStr);
+    return TRUE;
+}
+
+BOOL WINAPI Hooked_SetupDiGetDeviceInstanceIdW(HDEVINFO DeviceInfoSet, PSP_DEVINFO_DATA DeviceInfoData, PWSTR DeviceInstanceId, DWORD DeviceInstanceIdSize, PDWORD RequiredSize) {
+    DWORD needed = (DWORD)(wcslen(g_VirtualInstanceId) + 1);
+    if (RequiredSize) *RequiredSize = needed;
+    if (DeviceInstanceId && DeviceInstanceIdSize >= needed) {
+        wcscpy(DeviceInstanceId, g_VirtualInstanceId);
+    }
+    WriteLog("[SetupAPI Direct] Provided DeviceInstanceId: %ls\n", g_VirtualInstanceId);
+    return TRUE;
+}
+
+static void DirectPatchSetupAPI(HMODULE hMainExe) {
+    if (!hMainExe) return;
+    uintptr_t base = (uintptr_t)hMainExe;
+    
+    DWORD oldProtect;
+    if (VirtualProtect((void*)(base + 0x174b960), 0x50, PAGE_READWRITE, &oldProtect)) {
+        *(void**)(base + 0x174b960) = (void*)Hooked_SetupDiEnumDeviceInfo;
+        *(void**)(base + 0x174b970) = (void*)Hooked_SetupDiEnumDeviceInterfaces;
+        *(void**)(base + 0x174b980) = (void*)Hooked_SetupDiGetDeviceRegistryPropertyW;
+        *(void**)(base + 0x174b988) = (void*)Hooked_SetupDiGetDeviceInterfaceDetailW;
+        *(void**)(base + 0x174b998) = (void*)Hooked_SetupDiGetDeviceInstanceIdW;
+        VirtualProtect((void*)(base + 0x174b960), 0x50, oldProtect, &oldProtect);
+        WriteLog("[SetupAPI Direct] Successfully patched Horizon SetupAPI IAT at base %p + 0x174b960\n", hMainExe);
+    }
+}
+
+// ============================================================================
+// RawInput Spoofing (DualShock 4 VID 0x054C, PID 0x09CC)
 // ============================================================================
 
 typedef UINT (WINAPI *GetRawInputDeviceInfoW_t)(HANDLE, UINT, LPVOID, PUINT);
@@ -81,11 +185,8 @@ UINT WINAPI Hooked_GetRawInputDeviceInfoW(HANDLE hDevice, UINT uiCommand, LPVOID
         if (uiCommand == RIDI_DEVICEINFO) {
             PRID_DEVICE_INFO pInfo = (PRID_DEVICE_INFO)pData;
             if (pInfo->dwType == RIM_TYPEHID) {
-                if (pInfo->hid.dwVendorId == 0x054C || pInfo->hid.dwVendorId == 1356) {
-                    WriteLog("[RawInput Hook] Spoofed Sony RawInput VID 0x054C -> 0x045E (Xbox 360)\n");
-                    pInfo->hid.dwVendorId = 0x045E;  // Microsoft
-                    pInfo->hid.dwProductId = 0x028E; // Xbox 360 Controller
-                }
+                pInfo->hid.dwVendorId = 0x054C;  // Sony
+                pInfo->hid.dwProductId = 0x09CC; // DualShock 4 Wireless Controller
             }
         }
     }
@@ -101,53 +202,23 @@ UINT WINAPI Hooked_GetRawInputDeviceInfoA(HANDLE hDevice, UINT uiCommand, LPVOID
         if (uiCommand == RIDI_DEVICEINFO) {
             PRID_DEVICE_INFO pInfo = (PRID_DEVICE_INFO)pData;
             if (pInfo->dwType == RIM_TYPEHID) {
-                if (pInfo->hid.dwVendorId == 0x054C || pInfo->hid.dwVendorId == 1356) {
-                    WriteLog("[RawInput Hook] Spoofed Sony RawInput VID 0x054C -> 0x045E (Xbox 360)\n");
-                    pInfo->hid.dwVendorId = 0x045E;  // Microsoft
-                    pInfo->hid.dwProductId = 0x028E; // Xbox 360 Controller
-                }
+                pInfo->hid.dwVendorId = 0x054C;  // Sony
+                pInfo->hid.dwProductId = 0x09CC; // DualShock 4 Wireless Controller
             }
         }
     }
     return res;
 }
 
-static void PatchModuleIAT(HMODULE hMod) {
-    if (!hMod) return;
-    PIMAGE_DOS_HEADER dos = (PIMAGE_DOS_HEADER)hMod;
-    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return;
-    PIMAGE_NT_HEADERS nt = (PIMAGE_NT_HEADERS)((BYTE*)hMod + dos->e_lfanew);
-    if (nt->Signature != IMAGE_NT_SIGNATURE) return;
+static void PatchUser32IAT(HMODULE hMainExe) {
+    if (!hMainExe) return;
+    uintptr_t base = (uintptr_t)hMainExe;
     
-    IMAGE_DATA_DIRECTORY dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
-    if (dir.VirtualAddress == 0 || dir.Size == 0) return;
-    
-    PIMAGE_IMPORT_DESCRIPTOR desc = (PIMAGE_IMPORT_DESCRIPTOR)((BYTE*)hMod + dir.VirtualAddress);
-    for (; desc->Name != 0; desc++) {
-        const char* name = (const char*)((BYTE*)hMod + desc->Name);
-        if (_stricmp(name, "user32.dll") == 0) {
-            PIMAGE_THUNK_DATA thunk = (PIMAGE_THUNK_DATA)((BYTE*)hMod + desc->FirstThunk);
-            PIMAGE_THUNK_DATA origThunk = (PIMAGE_THUNK_DATA)((BYTE*)hMod + (desc->OriginalFirstThunk ? desc->OriginalFirstThunk : desc->FirstThunk));
-            for (; thunk->u1.Function != 0; thunk++, origThunk++) {
-                if (!IMAGE_SNAP_BY_ORDINAL(origThunk->u1.Ordinal)) {
-                    PIMAGE_IMPORT_BY_NAME importByName = (PIMAGE_IMPORT_BY_NAME)((BYTE*)hMod + origThunk->u1.AddressOfData);
-                    if (strcmp((const char*)importByName->Name, "GetRawInputDeviceInfoW") == 0) {
-                        DWORD oldProtect;
-                        VirtualProtect(&thunk->u1.Function, sizeof(void*), PAGE_READWRITE, &oldProtect);
-                        thunk->u1.Function = (ULONG_PTR)Hooked_GetRawInputDeviceInfoW;
-                        VirtualProtect(&thunk->u1.Function, sizeof(void*), oldProtect, &oldProtect);
-                        WriteLog("[IAT Patch] Hooked GetRawInputDeviceInfoW in module %p\n", hMod);
-                    }
-                    else if (strcmp((const char*)importByName->Name, "GetRawInputDeviceInfoA") == 0) {
-                        DWORD oldProtect;
-                        VirtualProtect(&thunk->u1.Function, sizeof(void*), PAGE_READWRITE, &oldProtect);
-                        thunk->u1.Function = (ULONG_PTR)Hooked_GetRawInputDeviceInfoA;
-                        VirtualProtect(&thunk->u1.Function, sizeof(void*), oldProtect, &oldProtect);
-                        WriteLog("[IAT Patch] Hooked GetRawInputDeviceInfoA in module %p\n", hMod);
-                    }
-                }
-            }
-        }
+    DWORD oldProtect;
+    if (VirtualProtect((void*)(base + 0x174bb90), 0x10, PAGE_READWRITE, &oldProtect)) {
+        *(void**)(base + 0x174bb90) = (void*)Hooked_GetRawInputDeviceInfoW;
+        VirtualProtect((void*)(base + 0x174bb90), 0x10, oldProtect, &oldProtect);
+        WriteLog("[User32 Direct] Successfully patched GetRawInputDeviceInfoW at base + 0x174bb90\n");
     }
 }
 
@@ -162,12 +233,9 @@ void SafeInitialize() {
     }
     InitUDP();
     EnsureUser32Pointers();
-    PatchModuleIAT(GetModuleHandle(NULL));
-    HMODULE hFullGame = GetModuleHandleA("fullgame.dll");
-    if (hFullGame) {
-        PatchModuleIAT(hFullGame);
-    }
-    WriteLog("[SteamAPI DLL] Hook & Safe RawInput Spoofing initialized successfully.\n");
+    DirectPatchSetupAPI(GetModuleHandle(NULL));
+    PatchUser32IAT(GetModuleHandle(NULL));
+    WriteLog("[SteamAPI DLL] DualShock 4 Native Glyph & Gamepad Synthesizer initialized.\n");
     g_Initialized = true;
     LeaveCriticalSection(&init_lock);
 }
@@ -178,15 +246,6 @@ void EnsureOrigInitialized() {
     }
 }
 
-// Send rumble values to macOS CoreHaptics server via UDP
-static void SendRumbleUDP(BYTE left_motor, BYTE right_motor) {
-    unsigned char packet[3];
-    packet[0] = 0x01;
-    packet[1] = left_motor;
-    packet[2] = right_motor;
-    sendto(udp_socket, (const char*)packet, 3, 0, (sockaddr*)&server_addr, sizeof(server_addr));
-}
-
 // ============================================================================
 // ISteamInput / ISteamController vtable hooks
 // ============================================================================
@@ -194,25 +253,37 @@ static void SendRumbleUDP(BYTE left_motor, BYTE right_motor) {
 void __cdecl Hooked_TriggerVibration(void* self, uint64_t inputHandle, unsigned short usLeftSpeed, unsigned short usRightSpeed) {
     EnsureOrigInitialized();
     SendRumbleUDP(usLeftSpeed / 256, usRightSpeed / 256);
-    if (real_TriggerVibration) {
-        real_TriggerVibration(self, inputHandle, 0, 0);
-    }
 }
 
 void __cdecl Hooked_TriggerVibrationExtended(void* self, uint64_t inputHandle, unsigned short usLeftSpeed, unsigned short usRightSpeed, unsigned short usLeftTriggerSpeed, unsigned short usRightTriggerSpeed) {
     EnsureOrigInitialized();
     SendRumbleUDP(usLeftSpeed / 256, usRightSpeed / 256);
-    if (real_TriggerVibrationExtended) {
-        real_TriggerVibrationExtended(self, inputHandle, 0, 0, 0, 0);
-    }
 }
 
 void __cdecl Hooked_ControllerTriggerVibration(void* self, uint64_t controllerHandle, unsigned short usLeftSpeed, unsigned short usRightSpeed) {
     EnsureOrigInitialized();
     SendRumbleUDP(usLeftSpeed / 256, usRightSpeed / 256);
-    if (real_ControllerTriggerVibration) {
-        real_ControllerTriggerVibration(self, controllerHandle, 0, 0);
+}
+
+int __cdecl Hooked_GetInputTypeForHandle(void* self, uint64_t inputHandle) {
+    return 5; // k_ESteamInputType_PS4Controller (DualShock 4)
+}
+
+int __cdecl Hooked_GetConnectedControllers(void* self, uint64_t* handlesOut) {
+    if (handlesOut) {
+        handlesOut[0] = 1;
     }
+    return 1;
+}
+
+uint64_t __cdecl Hooked_GetControllerForGamepadIndex(void* self, int nIndex) {
+    if (nIndex == 0) return 1;
+    return 0;
+}
+
+int __cdecl Hooked_GetGamepadIndexForController(void* self, uint64_t inputHandle) {
+    if (inputHandle == 1) return 0;
+    return -1;
 }
 
 // ============================================================================
@@ -221,12 +292,6 @@ void __cdecl Hooked_ControllerTriggerVibration(void* self, uint64_t controllerHa
 
 void* __cdecl DetourSteamInternal_FindOrCreateUserInterface(int hSteamUser, const char* pszInterfaceVersion) {
     EnsureOrigInitialized();
-    
-    // Check if fullgame.dll loaded dynamically and patch it
-    HMODULE hFullGame = GetModuleHandleA("fullgame.dll");
-    if (hFullGame) {
-        PatchModuleIAT(hFullGame);
-    }
 
     void* pInterface = NULL;
     if (orig_SteamInternal_FindOrCreateUserInterface) {
@@ -240,30 +305,28 @@ void* __cdecl DetourSteamInternal_FindOrCreateUserInterface(int hSteamUser, cons
     if (pInterface && pszInterfaceVersion) {
         if (strstr(pszInterfaceVersion, "SteamInput") != NULL) {
             void** vtable = *(void***)pInterface;
-            if (vtable && vtable[29] != (void*)Hooked_TriggerVibration) {
-                real_TriggerVibration = (SteamInputTriggerVibration_t)vtable[29];
-                real_TriggerVibrationExtended = (SteamInputTriggerVibrationExtended_t)vtable[30];
-                
+            if (vtable) {
                 DWORD oldProtect;
-                VirtualProtect(&vtable[29], 2 * sizeof(void*), PAGE_READWRITE, &oldProtect);
-                vtable[29] = (void*)Hooked_TriggerVibration;
-                vtable[30] = (void*)Hooked_TriggerVibrationExtended;
-                VirtualProtect(&vtable[29], 2 * sizeof(void*), oldProtect, &oldProtect);
+                VirtualProtect(&vtable[0], 50 * sizeof(void*), PAGE_READWRITE, &oldProtect);
                 
-                WriteLog("[SteamAPI DLL] Patched ISteamInput vtable for %s\n", pszInterfaceVersion);
+                vtable[6] = (void*)Hooked_GetConnectedControllers;
+                vtable[30] = (void*)Hooked_TriggerVibration;
+                vtable[37] = (void*)Hooked_GetInputTypeForHandle;
+                
+                VirtualProtect(&vtable[0], 50 * sizeof(void*), oldProtect, &oldProtect);
+                WriteLog("[SteamAPI DLL] Patched ISteamInput vtable (vtable[37]=GetInputTypeForHandle->PS4) for %s\n", pszInterfaceVersion);
             }
         }
         else if (strstr(pszInterfaceVersion, "SteamController") != NULL) {
             void** vtable = *(void***)pInterface;
-            if (vtable && vtable[23] != (void*)Hooked_ControllerTriggerVibration) {
-                real_ControllerTriggerVibration = (SteamInputTriggerVibration_t)vtable[23];
-                
+            if (vtable) {
                 DWORD oldProtect;
-                VirtualProtect(&vtable[23], sizeof(void*), PAGE_READWRITE, &oldProtect);
+                VirtualProtect(&vtable[0], 40 * sizeof(void*), PAGE_READWRITE, &oldProtect);
+                vtable[3] = (void*)Hooked_GetConnectedControllers;
                 vtable[23] = (void*)Hooked_ControllerTriggerVibration;
-                VirtualProtect(&vtable[23], sizeof(void*), oldProtect, &oldProtect);
-                
-                WriteLog("[SteamAPI DLL] Patched ISteamController vtable for %s\n", pszInterfaceVersion);
+                vtable[26] = (void*)Hooked_GetInputTypeForHandle;
+                VirtualProtect(&vtable[0], 40 * sizeof(void*), oldProtect, &oldProtect);
+                WriteLog("[SteamAPI DLL] Patched ISteamController vtable (vtable[26]=GetInputTypeForHandle->PS4) for %s\n", pszInterfaceVersion);
             }
         }
     }
@@ -275,12 +338,6 @@ void* __cdecl DetourSteamInternal_FindOrCreateUserInterface(int hSteamUser, cons
 // ============================================================================
 
 void LoadOriginalSteamApiDll() {
-    static bool log_cleared = false;
-    if (!log_cleared) {
-        log_cleared = true;
-        DeleteFileA("ds4link_proxy.log");
-    }
-    
     if (!hOrigSteamApiDll) {
         wchar_t path[MAX_PATH];
         if (hMySelf && GetModuleFileNameW(hMySelf, path, MAX_PATH)) {

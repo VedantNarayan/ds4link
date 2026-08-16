@@ -6,7 +6,7 @@ import ServiceManagement
 
 // Global log writing function
 func writeLog(_ message: String) {
-    let logPath = "/Users/Vedant/Documents/ds4_rumble_bridge/rumble_app.log"
+    let logPath = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/DS4Link.log").path
     let formatter = DateFormatter()
     formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
     let timestamp = formatter.string(from: Date())
@@ -70,7 +70,7 @@ class EngineProfileManager {
         else if nameLower.contains("spider") || nameLower.contains("miles") || nameLower.contains("horizon") ||
                 nameLower.contains("godofwar") || nameLower.contains("tsushima") || nameLower.contains("tlou") ||
                 nameLower.contains("uncharted") || nameLower.contains("returnal") || folderName.contains("horizon") {
-            profile = EngineProfile(engine: .sonyFirstParty, defaultGyroMode: 2, enableTouchpadToMap: true, impulseTriggerHaptics: true, isolateDInput: true)
+            profile = EngineProfile(engine: .sonyFirstParty, defaultGyroMode: 1, enableTouchpadToMap: true, impulseTriggerHaptics: true, isolateDInput: true)
             activeGameName = cleanTitle.capitalized
         }
         // 3. ForzaTech
@@ -81,18 +81,18 @@ class EngineProfileManager {
         // 4. Unity Engine
         else if FileManager.default.fileExists(atPath: gameFolder.appendingPathComponent("UnityPlayer.dll").path) ||
                 folderName.contains("wewerehere") || folderName.contains("subnautica") {
-            profile = EngineProfile(engine: .unity, defaultGyroMode: 2, enableTouchpadToMap: true, impulseTriggerHaptics: false, isolateDInput: true)
+            profile = EngineProfile(engine: .unity, defaultGyroMode: 1, enableTouchpadToMap: true, impulseTriggerHaptics: false, isolateDInput: true)
             activeGameName = cleanTitle.capitalized
         }
         // 5. Unreal Engine
         else if FileManager.default.fileExists(atPath: gameFolder.appendingPathComponent("Engine").path) ||
                 nameLower.contains("shipping") || nameLower.contains("avatar") {
-            profile = EngineProfile(engine: .unrealEngine, defaultGyroMode: 2, enableTouchpadToMap: true, impulseTriggerHaptics: false, isolateDInput: true)
+            profile = EngineProfile(engine: .unrealEngine, defaultGyroMode: 1, enableTouchpadToMap: true, impulseTriggerHaptics: false, isolateDInput: true)
             activeGameName = cleanTitle.capitalized
         }
         // 6. Universal Default
         else {
-            profile = EngineProfile(engine: .standardDirectX, defaultGyroMode: 2, enableTouchpadToMap: true, impulseTriggerHaptics: false, isolateDInput: true)
+            profile = EngineProfile(engine: .standardDirectX, defaultGyroMode: 1, enableTouchpadToMap: true, impulseTriggerHaptics: false, isolateDInput: true)
             activeGameName = cleanTitle.capitalized
         }
         
@@ -110,9 +110,7 @@ class EngineProfileManager {
 func getAllBottlePaths() -> [URL] {
     var paths: [URL] = []
     let candidates = [
-        "/Volumes/Mac_EXT/CrossOverData/CrossOver/Bottles",
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/CrossOver/Bottles").path,
-        "/Volumes/Mac_EXT/Heroic/Prefixes",
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config/heroic/prefixes").path,
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Whisky/Bottles").path,
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Steam/steamapps/compatdata").path
@@ -353,15 +351,10 @@ class GyroEngine {
     private var timer: DispatchSourceTimer?
     private var isStreaming = false
     
-    private var lastSentPitch: Int16 = 0
-    private var lastSentYaw: Int16 = 0
-    private var lastSentRoll: Int16 = 0
-    private var idleCount: Int = 0
-    
     var gyroMode: Int {
         get {
             let val = UserDefaults.standard.integer(forKey: "gyroMode")
-            return val == 0 ? 2 : val
+            return val == 0 ? 1 : val
         }
         set { UserDefaults.standard.set(newValue, forKey: "gyroMode") }
     }
@@ -393,13 +386,52 @@ class GyroEngine {
         t.resume()
         self.timer = t
         self.isStreaming = true
-        writeLog("[Gyro] 120Hz 1:1 Precision Gyro & Live Gamepad Engine active.")
+        writeLog("[Gyro] 120Hz Calibrated Gyro & Live Gamepad Engine active.")
     }
     
     private func pollAndStreamController() {
         guard let controller = GCController.controllers().first else { return }
         
-        // 1. Stream Live Gamepad State to XInput Proxy (Port 24681, Magic 0x03)
+        // 1. Calibrated Gyro Motion Stream (Magic 0x02)
+        if let motion = controller.motion {
+            if !motion.sensorsActive {
+                motion.sensorsActive = true
+            }
+            let rot = motion.rotationRate
+            // Apply deadzone (< 0.05 rad/s) to prevent resting drift or sky-gazing
+            let pitchRad = abs(rot.x) < 0.05 ? 0.0 : rot.x
+            let yawRad = abs(rot.y) < 0.05 ? 0.0 : rot.y
+            let rollRad = abs(rot.z) < 0.05 ? 0.0 : rot.z
+            
+            let pitchDeg = pitchRad * (180.0 / .pi)
+            let yawDeg = yawRad * (180.0 / .pi)
+            let rollDeg = rollRad * (180.0 / .pi)
+            
+            let pitchRate = Int16(clamping: Int(pitchDeg * 100.0))
+            let yawRate = Int16(clamping: Int(yawDeg * 100.0))
+            let rollRate = Int16(clamping: Int(rollDeg * 100.0))
+            
+            if gyroMode > 0 {
+                var gPacket = [UInt8](repeating: 0, count: 10)
+                gPacket[0] = 0x02 // Magic for gyro
+                gPacket[1] = UInt8(gyroMode)
+                withUnsafeBytes(of: pitchRate.littleEndian) { gPacket[2] = $0[0]; gPacket[3] = $0[1] }
+                withUnsafeBytes(of: yawRate.littleEndian) { gPacket[4] = $0[0]; gPacket[5] = $0[1] }
+                withUnsafeBytes(of: rollRate.littleEndian) { gPacket[6] = $0[0]; gPacket[7] = $0[1] }
+                let sens = Int16(gyroSensitivity)
+                withUnsafeBytes(of: sens.littleEndian) { gPacket[8] = $0[0]; gPacket[9] = $0[1] }
+                
+                if gyroSocket >= 0 {
+                    _ = withUnsafePointer(to: &gyroAddr) {
+                        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                            sendto(gyroSocket, gPacket, gPacket.count, 0, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+                        }
+                    }
+                }
+            }
+        }
+        
+        // 2. Stream Live Gamepad State to XInput Proxy (Port 24681, Magic 0x03)
         if let gp = controller.extendedGamepad {
             var packet = [UInt8](repeating: 0, count: 13)
             packet[0] = 0x03 // Magic for gamepad
@@ -442,46 +474,6 @@ class GyroEngine {
                 }
             }
         }
-        
-        // 2. Stream Gyro (Port 24681, Magic 0x02)
-        guard gyroMode > 0, let motion = controller.motion else { return }
-        let rot = motion.rotationRate
-        let pitchRate = Int16(clamping: Int(rot.x * 57.2958 * 100.0))
-        let yawRate = Int16(clamping: Int(rot.y * 57.2958 * 100.0))
-        let rollRate = Int16(clamping: Int(rot.z * 57.2958 * 100.0))
-        
-        let deltaPitch = abs(Int(pitchRate) - Int(lastSentPitch))
-        let deltaYaw = abs(Int(yawRate) - Int(lastSentYaw))
-        let deltaRoll = abs(Int(rollRate) - Int(lastSentRoll))
-        
-        if deltaPitch < 8 && deltaYaw < 8 && deltaRoll < 8 && abs(pitchRate) < 15 && abs(yawRate) < 15 {
-            idleCount += 1
-            if idleCount > 2 { return }
-        } else {
-            idleCount = 0
-        }
-        
-        lastSentPitch = pitchRate
-        lastSentYaw = yawRate
-        lastSentRoll = rollRate
-        
-        var packet = [UInt8](repeating: 0, count: 10)
-        packet[0] = 0x02
-        packet[1] = UInt8(gyroMode)
-        
-        withUnsafeBytes(of: pitchRate.littleEndian) { packet[2] = $0[0]; packet[3] = $0[1] }
-        withUnsafeBytes(of: yawRate.littleEndian) { packet[4] = $0[0]; packet[5] = $0[1] }
-        withUnsafeBytes(of: rollRate.littleEndian) { packet[6] = $0[0]; packet[7] = $0[1] }
-        let sens = Int16(gyroSensitivity)
-        withUnsafeBytes(of: sens.littleEndian) { packet[8] = $0[0]; packet[9] = $0[1] }
-        
-        if gyroSocket >= 0 {
-            _ = withUnsafePointer(to: &gyroAddr) {
-                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                    sendto(gyroSocket, packet, packet.count, 0, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
-                }
-            }
-        }
     }
 }
 
@@ -509,7 +501,7 @@ class HapticBridge: NSObject {
     static func registerDefaults() {
         UserDefaults.standard.register(defaults: [
             "rumbleIntensity": Float(0.85),
-            "gyroMode": 2,
+            "gyroMode": 1,
             "gyroSensitivity": 100
         ])
     }
@@ -558,6 +550,26 @@ class HapticBridge: NSObject {
             if leftEngine == nil && rightEngine == nil, let first = localities.first {
                 leftEngine = haptics.createEngine(withLocality: first)
                 rightEngine = leftEngine
+            }
+            
+            leftEngine?.resetHandler = { [weak self] in
+                try? self?.leftEngine?.start()
+                self?.leftPlayer = nil
+            }
+            leftEngine?.stoppedHandler = { [weak self] _ in
+                try? self?.leftEngine?.start()
+                self?.leftPlayer = nil
+            }
+            
+            if rightEngine != leftEngine {
+                rightEngine?.resetHandler = { [weak self] in
+                    try? self?.rightEngine?.start()
+                    self?.rightPlayer = nil
+                }
+                rightEngine?.stoppedHandler = { [weak self] _ in
+                    try? self?.rightEngine?.start()
+                    self?.rightPlayer = nil
+                }
             }
             
             try leftEngine?.start()
@@ -1082,7 +1094,7 @@ class PopoverViewController: NSViewController {
     
     override func loadView() {
         PopoverViewController.shared = self
-        let root = NSView(frame: NSRect(x: 0, y: 0, width: 305, height: 405))
+        let root = NSView(frame: NSRect(x: 0, y: 0, width: 260, height: 360))
         self.view = root
         root.wantsLayer = true
         
@@ -1090,15 +1102,15 @@ class PopoverViewController: NSViewController {
         mainStack.orientation = .vertical
         mainStack.alignment = .leading
         mainStack.distribution = .fill
-        mainStack.spacing = 10
+        mainStack.spacing = 6
         mainStack.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(mainStack)
         
         NSLayoutConstraint.activate([
-            mainStack.topAnchor.constraint(equalTo: root.topAnchor, constant: 12),
-            mainStack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
-            mainStack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
-            mainStack.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -12)
+            mainStack.topAnchor.constraint(equalTo: root.topAnchor, constant: 8),
+            mainStack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 8),
+            mainStack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -8),
+            mainStack.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -8)
         ])
         
         // 1. Header Card (Device & Game DNA)
@@ -1109,7 +1121,7 @@ class PopoverViewController: NSViewController {
         let headerContent = NSStackView()
         headerContent.orientation = .horizontal
         headerContent.alignment = .centerY
-        headerContent.spacing = 10
+        headerContent.spacing = 8
         headerContent.translatesAutoresizingMaskIntoConstraints = false
         headerCard.addSubview(headerContent)
         
@@ -1117,14 +1129,14 @@ class PopoverViewController: NSViewController {
         iconView.image = NSImage(systemSymbolName: "gamecontroller.fill", accessibilityDescription: nil)
         iconView.contentTintColor = NSColor(red: 0.35, green: 0.85, blue: 1.0, alpha: 1.0)
         iconView.translatesAutoresizingMaskIntoConstraints = false
-        iconView.widthAnchor.constraint(equalToConstant: 30).isActive = true
-        iconView.heightAnchor.constraint(equalToConstant: 30).isActive = true
+        iconView.widthAnchor.constraint(equalToConstant: 24).isActive = true
+        iconView.heightAnchor.constraint(equalToConstant: 24).isActive = true
         headerContent.addArrangedSubview(iconView)
         
         let textStack = NSStackView()
         textStack.orientation = .vertical
         textStack.alignment = .leading
-        textStack.spacing = 2
+        textStack.spacing = 1
         textStack.translatesAutoresizingMaskIntoConstraints = false
         headerContent.addArrangedSubview(textStack)
         
@@ -1137,7 +1149,7 @@ class PopoverViewController: NSViewController {
         topRow.widthAnchor.constraint(equalTo: textStack.widthAnchor).isActive = true
         
         controllerNameLabel = NSTextField(labelWithString: "DUALSHOCK 4")
-        controllerNameLabel.font = NSFont.systemFont(ofSize: 12.5, weight: .bold)
+        controllerNameLabel.font = NSFont.systemFont(ofSize: 11.5, weight: .bold)
         controllerNameLabel.textColor = .labelColor
         topRow.addArrangedSubview(controllerNameLabel)
         
@@ -1146,37 +1158,37 @@ class PopoverViewController: NSViewController {
         topRow.addArrangedSubview(spacer)
         
         batteryBadge = NSTextField(labelWithString: " 25% ")
-        batteryBadge.font = NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .bold)
+        batteryBadge.font = NSFont.monospacedDigitSystemFont(ofSize: 9.5, weight: .bold)
         batteryBadge.alignment = .center
         batteryBadge.textColor = NSColor(red: 0.25, green: 0.85, blue: 0.45, alpha: 1.0)
         batteryBadge.backgroundColor = NSColor(red: 0.25, green: 0.85, blue: 0.45, alpha: 0.15)
         batteryBadge.drawsBackground = true
         batteryBadge.wantsLayer = true
-        batteryBadge.layer?.cornerRadius = 5
+        batteryBadge.layer?.cornerRadius = 4
         batteryBadge.layer?.masksToBounds = true
         topRow.addArrangedSubview(batteryBadge)
         
         connectionSubLabel = NSTextField(labelWithString: "Bluetooth • Universal Auto-Hook")
-        connectionSubLabel.font = NSFont.systemFont(ofSize: 10, weight: .medium)
+        connectionSubLabel.font = NSFont.systemFont(ofSize: 9, weight: .medium)
         connectionSubLabel.textColor = .secondaryLabelColor
         textStack.addArrangedSubview(connectionSubLabel)
         
         engineBadge = NSTextField(labelWithString: "⚡ Universal Game Engine")
-        engineBadge.font = NSFont.systemFont(ofSize: 9.5, weight: .semibold)
+        engineBadge.font = NSFont.systemFont(ofSize: 9, weight: .semibold)
         engineBadge.textColor = NSColor(red: 0.4, green: 0.8, blue: 1.0, alpha: 1.0)
         engineBadge.lineBreakMode = .byTruncatingTail
         textStack.addArrangedSubview(engineBadge)
         
         audioStatusLabel = NSTextField(labelWithString: "🔊 Speaker: Requires USB Cable")
-        audioStatusLabel.font = NSFont.systemFont(ofSize: 9.0, weight: .regular)
+        audioStatusLabel.font = NSFont.systemFont(ofSize: 8.5, weight: .regular)
         audioStatusLabel.textColor = .tertiaryLabelColor
         textStack.addArrangedSubview(audioStatusLabel)
         
         NSLayoutConstraint.activate([
-            headerContent.topAnchor.constraint(equalTo: headerCard.topAnchor, constant: 9),
-            headerContent.leadingAnchor.constraint(equalTo: headerCard.leadingAnchor, constant: 10),
-            headerContent.trailingAnchor.constraint(equalTo: headerCard.trailingAnchor, constant: -10),
-            headerContent.bottomAnchor.constraint(equalTo: headerCard.bottomAnchor, constant: -9)
+            headerContent.topAnchor.constraint(equalTo: headerCard.topAnchor, constant: 7),
+            headerContent.leadingAnchor.constraint(equalTo: headerCard.leadingAnchor, constant: 8),
+            headerContent.trailingAnchor.constraint(equalTo: headerCard.trailingAnchor, constant: -8),
+            headerContent.bottomAnchor.constraint(equalTo: headerCard.bottomAnchor, constant: -7)
         ])
         
         // 2. Haptics Card
@@ -1187,7 +1199,7 @@ class PopoverViewController: NSViewController {
         let hapStack = NSStackView()
         hapStack.orientation = .vertical
         hapStack.alignment = .leading
-        hapStack.spacing = 7
+        hapStack.spacing = 5
         hapStack.translatesAutoresizingMaskIntoConstraints = false
         hapticsCard.addSubview(hapStack)
         
@@ -1199,7 +1211,7 @@ class PopoverViewController: NSViewController {
         hapHeaderRow.widthAnchor.constraint(equalTo: hapStack.widthAnchor).isActive = true
         
         let hapTitle = NSTextField(labelWithString: "CoreHaptics Rumble")
-        hapTitle.font = NSFont.systemFont(ofSize: 11, weight: .bold)
+        hapTitle.font = NSFont.systemFont(ofSize: 10, weight: .bold)
         hapTitle.textColor = .secondaryLabelColor
         hapHeaderRow.addArrangedSubview(hapTitle)
         
@@ -1208,7 +1220,7 @@ class PopoverViewController: NSViewController {
         hapHeaderRow.addArrangedSubview(hapSpacer)
         
         intensityLabel = NSTextField(labelWithString: "\(Int(HapticBridge.shared.rumbleIntensity * 100))%")
-        intensityLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .bold)
+        intensityLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .bold)
         intensityLabel.textColor = .labelColor
         hapHeaderRow.addArrangedSubview(intensityLabel)
         
@@ -1221,16 +1233,16 @@ class PopoverViewController: NSViewController {
         let testBtn = NSButton(title: "Test Dual-Motor Vibration", target: self, action: #selector(testRumbleClicked))
         testBtn.bezelStyle = .rounded
         testBtn.controlSize = .small
-        testBtn.font = NSFont.systemFont(ofSize: 10.5, weight: .medium)
+        testBtn.font = NSFont.systemFont(ofSize: 10, weight: .medium)
         testBtn.translatesAutoresizingMaskIntoConstraints = false
         hapStack.addArrangedSubview(testBtn)
         testBtn.widthAnchor.constraint(equalTo: hapStack.widthAnchor).isActive = true
         
         NSLayoutConstraint.activate([
-            hapStack.topAnchor.constraint(equalTo: hapticsCard.topAnchor, constant: 9),
-            hapStack.leadingAnchor.constraint(equalTo: hapticsCard.leadingAnchor, constant: 10),
-            hapStack.trailingAnchor.constraint(equalTo: hapticsCard.trailingAnchor, constant: -10),
-            hapStack.bottomAnchor.constraint(equalTo: hapticsCard.bottomAnchor, constant: -9)
+            hapStack.topAnchor.constraint(equalTo: hapticsCard.topAnchor, constant: 7),
+            hapStack.leadingAnchor.constraint(equalTo: hapticsCard.leadingAnchor, constant: 8),
+            hapStack.trailingAnchor.constraint(equalTo: hapticsCard.trailingAnchor, constant: -8),
+            hapStack.bottomAnchor.constraint(equalTo: hapticsCard.bottomAnchor, constant: -7)
         ])
         
         // 3. Gyro Card
@@ -1241,7 +1253,7 @@ class PopoverViewController: NSViewController {
         let gyroStack = NSStackView()
         gyroStack.orientation = .vertical
         gyroStack.alignment = .leading
-        gyroStack.spacing = 7
+        gyroStack.spacing = 5
         gyroStack.translatesAutoresizingMaskIntoConstraints = false
         gyroCard.addSubview(gyroStack)
         
@@ -1253,7 +1265,7 @@ class PopoverViewController: NSViewController {
         gyroHeaderRow.widthAnchor.constraint(equalTo: gyroStack.widthAnchor).isActive = true
         
         let gyroTitle = NSTextField(labelWithString: "Adaptive Gyro Aiming")
-        gyroTitle.font = NSFont.systemFont(ofSize: 11, weight: .bold)
+        gyroTitle.font = NSFont.systemFont(ofSize: 10, weight: .bold)
         gyroTitle.textColor = .secondaryLabelColor
         gyroHeaderRow.addArrangedSubview(gyroTitle)
         
@@ -1262,7 +1274,7 @@ class PopoverViewController: NSViewController {
         gyroHeaderRow.addArrangedSubview(gyroSpacer)
         
         gyroSensLabel = NSTextField(labelWithString: "\(GyroEngine.shared.gyroSensitivity)%")
-        gyroSensLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .bold)
+        gyroSensLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .bold)
         gyroSensLabel.textColor = .labelColor
         gyroHeaderRow.addArrangedSubview(gyroSensLabel)
         
@@ -1281,17 +1293,17 @@ class PopoverViewController: NSViewController {
         gyroSensitivitySlider.widthAnchor.constraint(equalTo: gyroStack.widthAnchor).isActive = true
         
         NSLayoutConstraint.activate([
-            gyroStack.topAnchor.constraint(equalTo: gyroCard.topAnchor, constant: 9),
-            gyroStack.leadingAnchor.constraint(equalTo: gyroCard.leadingAnchor, constant: 10),
-            gyroStack.trailingAnchor.constraint(equalTo: gyroCard.trailingAnchor, constant: -10),
-            gyroStack.bottomAnchor.constraint(equalTo: gyroCard.bottomAnchor, constant: -9)
+            gyroStack.topAnchor.constraint(equalTo: gyroCard.topAnchor, constant: 7),
+            gyroStack.leadingAnchor.constraint(equalTo: gyroCard.leadingAnchor, constant: 8),
+            gyroStack.trailingAnchor.constraint(equalTo: gyroCard.trailingAnchor, constant: -8),
+            gyroStack.bottomAnchor.constraint(equalTo: gyroCard.bottomAnchor, constant: -7)
         ])
         
         // 4. Action Buttons Row (Sync, Help, Console)
         let footerRow = NSStackView()
         footerRow.orientation = .horizontal
         footerRow.distribution = .fillEqually
-        footerRow.spacing = 8
+        footerRow.spacing = 6
         footerRow.translatesAutoresizingMaskIntoConstraints = false
         mainStack.addArrangedSubview(footerRow)
         footerRow.widthAnchor.constraint(equalTo: mainStack.widthAnchor).isActive = true
@@ -1404,7 +1416,8 @@ class PopoverViewController: NSViewController {
     }
     
     @objc func openLogsClicked() {
-        NSWorkspace.shared.open(URL(fileURLWithPath: "/Users/Vedant/Documents/ds4_rumble_bridge/rumble_app.log"))
+        let logUrl = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/DS4Link.log")
+        NSWorkspace.shared.open(logUrl)
     }
     
     @objc func quitClicked() {
@@ -1435,13 +1448,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         server.start(port: 24680)
         GyroEngine.shared.start()
         GameWatcher.shared.start()
-        autoPatchAllBottles()
+        DispatchQueue.global(qos: .utility).async {
+            autoPatchAllBottles()
+        }
         
         HapticBridge.shared.onControllerStatusChanged = {
             DispatchQueue.main.async {
                 PopoverViewController.shared?.updateUI()
             }
         }
+    }
+    
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        togglePopover(nil)
+        return true
     }
     
     private func setupStatusItem() {
@@ -1474,7 +1494,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     
     private func setupPopover() {
         let pop = NSPopover()
-        pop.contentSize = NSSize(width: 305, height: 405)
+        pop.contentSize = NSSize(width: 260, height: 360)
         pop.behavior = .transient
         pop.animates = true
         pop.contentViewController = PopoverViewController()

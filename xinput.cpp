@@ -21,6 +21,7 @@ static SOCKET udp_receiver_socket = INVALID_SOCKET;
 static HANDLE hReceiverThread = NULL;
 static volatile bool g_receiver_running = false;
 
+#pragma pack(push, 1)
 struct GyroPacket {
     uint8_t magic;         // 0x02 for gyro
     uint8_t mode;          // 0 = Off, 1 = Stick Emulation, 2 = 1:1 Mouse Delta (Aim L2), 3 = 1:1 Mouse Delta (Always)
@@ -40,6 +41,7 @@ struct GamepadPacket {
     int16_t sThumbRX;
     int16_t sThumbRY;
 };
+#pragma pack(pop)
 
 static volatile float g_gyro_pitch_delta = 0.0f;
 static volatile float g_gyro_yaw_delta = 0.0f;
@@ -73,12 +75,7 @@ static XInputGetAudioDeviceIds_t orig_XInputGetAudioDeviceIds = NULL;
 
 static void InjectMouseDelta(int dx, int dy) {
     if (dx == 0 && dy == 0) return;
-    INPUT input = {0};
-    input.type = INPUT_MOUSE;
-    input.mi.dwFlags = MOUSEEVENTF_MOVE;
-    input.mi.dx = dx;
-    input.mi.dy = dy;
-    SendInput(1, &input, sizeof(INPUT));
+    mouse_event(MOUSEEVENTF_MOVE, (DWORD)dx, (DWORD)dy, 0, 0);
 }
 
 static DWORD WINAPI UDPReceiverThread(LPVOID lpParam) {
@@ -104,23 +101,29 @@ static DWORD WINAPI UDPReceiverThread(LPVOID lpParam) {
 
     while (g_receiver_running) {
         int bytes = recv(udp_receiver_socket, (char*)buffer, sizeof(buffer), 0);
-        if (bytes >= (int)sizeof(GyroPacket) && buffer[0] == 0x02) {
+        if (bytes >= 10 && buffer[0] == 0x02) {
             GyroPacket* p = (GyroPacket*)buffer;
             g_gyro_mode = p->mode;
             g_gyro_sensitivity = (float)p->sensitivity / 100.0f;
             float pitch = ((float)p->pitch_rate / 100.0f) * g_gyro_sensitivity;
             float yaw = ((float)p->yaw_rate / 100.0f) * g_gyro_sensitivity;
 
+            // Deadzone to prevent resting drift or sky-gazing
+            if (fabsf(pitch) < 0.35f) pitch = 0.0f;
+            if (fabsf(yaw) < 0.35f) yaw = 0.0f;
+
             g_gyro_pitch_delta = pitch;
             g_gyro_yaw_delta = yaw;
 
             if ((g_gyro_mode == 2 && g_aim_trigger_active) || g_gyro_mode == 3) {
-                int m_dx = (int)(-yaw * 2.8f);
-                int m_dy = (int)(-pitch * 2.8f);
-                InjectMouseDelta(m_dx, m_dy);
+                if (pitch != 0.0f || yaw != 0.0f) {
+                    int m_dx = (int)(-yaw * 2.8f);
+                    int m_dy = (int)(-pitch * 2.8f);
+                    InjectMouseDelta(m_dx, m_dy);
+                }
             }
         }
-        else if (bytes >= (int)sizeof(GamepadPacket) && buffer[0] == 0x03) {
+        else if (bytes >= 13 && buffer[0] == 0x03) {
             GamepadPacket* gp = (GamepadPacket*)buffer;
             EnterCriticalSection(&init_lock);
             g_live_udp_gamepad_state.dwPacketNumber++;
@@ -264,22 +267,22 @@ __declspec(dllexport) DWORD WINAPI XInputGetState(DWORD dwUserIndex, XINPUT_STAT
     if (dwUserIndex != 0) return ERROR_DEVICE_NOT_CONNECTED;
     LoadOriginalDll();
     
-    // First try original Wine XInput
-    if (orig_XInputGetState && orig_XInputGetState != (XInputGetState_t)XInputGetState) {
-        DWORD result = orig_XInputGetState(dwUserIndex, pState);
-        if (result == ERROR_SUCCESS && pState) {
-            SanitizeAndBlendGamepadState(&pState->Gamepad);
-            return ERROR_SUCCESS;
-        }
-    }
-    
-    // Direct UDP Gamepad Bridge from macOS DS4Link driver
+    // First check direct UDP Gamepad Bridge from macOS DS4Link driver
     if (pState && (GetTickCount() - g_last_udp_packet_time < 3000)) {
         EnterCriticalSection(&init_lock);
         *pState = g_live_udp_gamepad_state;
         LeaveCriticalSection(&init_lock);
         SanitizeAndBlendGamepadState(&pState->Gamepad);
         return ERROR_SUCCESS;
+    }
+
+    // Fallback to original Wine XInput
+    if (orig_XInputGetState && orig_XInputGetState != (XInputGetState_t)XInputGetState) {
+        DWORD result = orig_XInputGetState(dwUserIndex, pState);
+        if (result == ERROR_SUCCESS && pState) {
+            SanitizeAndBlendGamepadState(&pState->Gamepad);
+            return ERROR_SUCCESS;
+        }
     }
 
     return ERROR_DEVICE_NOT_CONNECTED;
@@ -358,6 +361,18 @@ __declspec(dllexport) DWORD WINAPI XInputGetKeystroke(DWORD dwUserIndex, DWORD d
 
 __declspec(dllexport) DWORD WINAPI XInputGetAudioDeviceIds(DWORD dwUserIndex, LPWSTR pRenderDeviceId, UINT* pRenderCount, LPWSTR pCaptureDeviceId, UINT* pCaptureCount) {
     return ERROR_DEVICE_NOT_CONNECTED;
+}
+
+__declspec(dllexport) DWORD WINAPI XInputWaitForGuideButton(DWORD dwUserIndex, DWORD dwFlags, void* pVoid) {
+    return ERROR_SUCCESS;
+}
+
+__declspec(dllexport) DWORD WINAPI XInputCancelGuideButtonWait(DWORD dwUserIndex) {
+    return ERROR_SUCCESS;
+}
+
+__declspec(dllexport) DWORD WINAPI XInputPowerOffController(DWORD dwUserIndex) {
+    return ERROR_SUCCESS;
 }
 
 __declspec(dllexport) BOOL WINAPI DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
