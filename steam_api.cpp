@@ -1,12 +1,10 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
-#include <psapi.h>
 #include <string>
 #include <cstdint>
 
 #pragma comment(lib, "ws2_32.lib")
-#pragma comment(lib, "psapi.lib")
 
 // Globals
 HMODULE hOrigSteamApiDll = NULL;
@@ -60,11 +58,25 @@ void InitUDP() {
 typedef UINT (WINAPI *GetRawInputDeviceInfoW_t)(HANDLE, UINT, LPVOID, PUINT);
 typedef UINT (WINAPI *GetRawInputDeviceInfoA_t)(HANDLE, UINT, LPVOID, PUINT);
 
-static GetRawInputDeviceInfoW_t orig_GetRawInputDeviceInfoW = NULL;
-static GetRawInputDeviceInfoA_t orig_GetRawInputDeviceInfoA = NULL;
+static GetRawInputDeviceInfoW_t pRealGetRawInputDeviceInfoW = NULL;
+static GetRawInputDeviceInfoA_t pRealGetRawInputDeviceInfoA = NULL;
+
+static void EnsureUser32Pointers() {
+    if (!pRealGetRawInputDeviceInfoW) {
+        HMODULE hUser32 = GetModuleHandleA("user32.dll");
+        if (!hUser32) hUser32 = LoadLibraryA("user32.dll");
+        if (hUser32) {
+            pRealGetRawInputDeviceInfoW = (GetRawInputDeviceInfoW_t)GetProcAddress(hUser32, "GetRawInputDeviceInfoW");
+            pRealGetRawInputDeviceInfoA = (GetRawInputDeviceInfoA_t)GetProcAddress(hUser32, "GetRawInputDeviceInfoA");
+        }
+    }
+}
 
 UINT WINAPI Hooked_GetRawInputDeviceInfoW(HANDLE hDevice, UINT uiCommand, LPVOID pData, PUINT pcbSize) {
-    UINT res = orig_GetRawInputDeviceInfoW ? orig_GetRawInputDeviceInfoW(hDevice, uiCommand, pData, pcbSize) : (UINT)-1;
+    EnsureUser32Pointers();
+    if (!pRealGetRawInputDeviceInfoW) return (UINT)-1;
+
+    UINT res = pRealGetRawInputDeviceInfoW(hDevice, uiCommand, pData, pcbSize);
     if (res != (UINT)-1 && pData) {
         if (uiCommand == RIDI_DEVICEINFO) {
             PRID_DEVICE_INFO pInfo = (PRID_DEVICE_INFO)pData;
@@ -73,13 +85,6 @@ UINT WINAPI Hooked_GetRawInputDeviceInfoW(HANDLE hDevice, UINT uiCommand, LPVOID
                     WriteLog("[RawInput Hook] Spoofed Sony RawInput VID 0x054C -> 0x045E (Xbox 360)\n");
                     pInfo->hid.dwVendorId = 0x045E;  // Microsoft
                     pInfo->hid.dwProductId = 0x028E; // Xbox 360 Controller
-                }
-            }
-        } else if (uiCommand == RIDI_DEVICENAME) {
-            wchar_t* str = (wchar_t*)pData;
-            for (wchar_t* p = str; *p && *(p+1) && *(p+2) && *(p+3); p++) {
-                if ((p[0] == L'0') && (p[1] == L'5') && (p[2] == L'4') && (p[3] == L'c' || p[3] == L'C')) {
-                    p[1] = L'4'; p[2] = L'5'; p[3] = L'e';
                 }
             }
         }
@@ -88,7 +93,10 @@ UINT WINAPI Hooked_GetRawInputDeviceInfoW(HANDLE hDevice, UINT uiCommand, LPVOID
 }
 
 UINT WINAPI Hooked_GetRawInputDeviceInfoA(HANDLE hDevice, UINT uiCommand, LPVOID pData, PUINT pcbSize) {
-    UINT res = orig_GetRawInputDeviceInfoA ? orig_GetRawInputDeviceInfoA(hDevice, uiCommand, pData, pcbSize) : (UINT)-1;
+    EnsureUser32Pointers();
+    if (!pRealGetRawInputDeviceInfoA) return (UINT)-1;
+
+    UINT res = pRealGetRawInputDeviceInfoA(hDevice, uiCommand, pData, pcbSize);
     if (res != (UINT)-1 && pData) {
         if (uiCommand == RIDI_DEVICEINFO) {
             PRID_DEVICE_INFO pInfo = (PRID_DEVICE_INFO)pData;
@@ -99,80 +107,45 @@ UINT WINAPI Hooked_GetRawInputDeviceInfoA(HANDLE hDevice, UINT uiCommand, LPVOID
                     pInfo->hid.dwProductId = 0x028E; // Xbox 360 Controller
                 }
             }
-        } else if (uiCommand == RIDI_DEVICENAME) {
-            char* str = (char*)pData;
-            for (char* p = str; *p && *(p+1) && *(p+2) && *(p+3); p++) {
-                if ((p[0] == '0') && (p[1] == '5') && (p[2] == '4') && (p[3] == 'c' || p[3] == 'C')) {
-                    p[1] = '4'; p[2] = '5'; p[3] = 'e';
-                }
-            }
         }
     }
     return res;
 }
 
-static void PatchIAT(HMODULE hModule, const char* targetDllName, const char* functionName, void* newFunction, void** originalFunction) {
-    if (!hModule) return;
+static void PatchModuleIAT(HMODULE hMod) {
+    if (!hMod) return;
+    PIMAGE_DOS_HEADER dos = (PIMAGE_DOS_HEADER)hMod;
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return;
+    PIMAGE_NT_HEADERS nt = (PIMAGE_NT_HEADERS)((BYTE*)hMod + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return;
     
-    PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)hModule;
-    if (dosHeader->e_magic != IMAGE_DOS_SIGNATURE) return;
+    IMAGE_DATA_DIRECTORY dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if (dir.VirtualAddress == 0 || dir.Size == 0) return;
     
-    PIMAGE_NT_HEADERS ntHeaders = (PIMAGE_NT_HEADERS)((BYTE*)hModule + dosHeader->e_lfanew);
-    if (ntHeaders->Signature != IMAGE_NT_SIGNATURE) return;
-    
-    IMAGE_DATA_DIRECTORY importDataDir = ntHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
-    if (importDataDir.VirtualAddress == 0 || importDataDir.Size == 0) return;
-    
-    PIMAGE_IMPORT_DESCRIPTOR importDesc = (PIMAGE_IMPORT_DESCRIPTOR)((BYTE*)hModule + importDataDir.VirtualAddress);
-    
-    for (; importDesc->Name != 0; importDesc++) {
-        const char* importedDllName = (const char*)((BYTE*)hModule + importDesc->Name);
-        if (_stricmp(importedDllName, targetDllName) == 0) {
-            PIMAGE_THUNK_DATA thunk = (PIMAGE_THUNK_DATA)((BYTE*)hModule + importDesc->FirstThunk);
-            PIMAGE_THUNK_DATA origThunk = (PIMAGE_THUNK_DATA)((BYTE*)hModule + (importDesc->OriginalFirstThunk ? importDesc->OriginalFirstThunk : importDesc->FirstThunk));
-            
+    PIMAGE_IMPORT_DESCRIPTOR desc = (PIMAGE_IMPORT_DESCRIPTOR)((BYTE*)hMod + dir.VirtualAddress);
+    for (; desc->Name != 0; desc++) {
+        const char* name = (const char*)((BYTE*)hMod + desc->Name);
+        if (_stricmp(name, "user32.dll") == 0) {
+            PIMAGE_THUNK_DATA thunk = (PIMAGE_THUNK_DATA)((BYTE*)hMod + desc->FirstThunk);
+            PIMAGE_THUNK_DATA origThunk = (PIMAGE_THUNK_DATA)((BYTE*)hMod + (desc->OriginalFirstThunk ? desc->OriginalFirstThunk : desc->FirstThunk));
             for (; thunk->u1.Function != 0; thunk++, origThunk++) {
                 if (!IMAGE_SNAP_BY_ORDINAL(origThunk->u1.Ordinal)) {
-                    PIMAGE_IMPORT_BY_NAME importByName = (PIMAGE_IMPORT_BY_NAME)((BYTE*)hModule + origThunk->u1.AddressOfData);
-                    if (strcmp((const char*)importByName->Name, functionName) == 0) {
-                        if (originalFunction && !*originalFunction) {
-                            *originalFunction = (void*)thunk->u1.Function;
-                        }
-                        
+                    PIMAGE_IMPORT_BY_NAME importByName = (PIMAGE_IMPORT_BY_NAME)((BYTE*)hMod + origThunk->u1.AddressOfData);
+                    if (strcmp((const char*)importByName->Name, "GetRawInputDeviceInfoW") == 0) {
                         DWORD oldProtect;
                         VirtualProtect(&thunk->u1.Function, sizeof(void*), PAGE_READWRITE, &oldProtect);
-                        thunk->u1.Function = (ULONG_PTR)newFunction;
+                        thunk->u1.Function = (ULONG_PTR)Hooked_GetRawInputDeviceInfoW;
                         VirtualProtect(&thunk->u1.Function, sizeof(void*), oldProtect, &oldProtect);
-                        WriteLog("[IAT Patch] Successfully hooked %s in module %p\n", functionName, hModule);
-                        return;
+                        WriteLog("[IAT Patch] Hooked GetRawInputDeviceInfoW in module %p\n", hMod);
+                    }
+                    else if (strcmp((const char*)importByName->Name, "GetRawInputDeviceInfoA") == 0) {
+                        DWORD oldProtect;
+                        VirtualProtect(&thunk->u1.Function, sizeof(void*), PAGE_READWRITE, &oldProtect);
+                        thunk->u1.Function = (ULONG_PTR)Hooked_GetRawInputDeviceInfoA;
+                        VirtualProtect(&thunk->u1.Function, sizeof(void*), oldProtect, &oldProtect);
+                        WriteLog("[IAT Patch] Hooked GetRawInputDeviceInfoA in module %p\n", hMod);
                     }
                 }
-            }
-        }
-    }
-}
-
-static void InstallRawInputHooks() {
-    HMODULE hUser32 = GetModuleHandleA("user32.dll");
-    if (hUser32) {
-        orig_GetRawInputDeviceInfoW = (GetRawInputDeviceInfoW_t)GetProcAddress(hUser32, "GetRawInputDeviceInfoW");
-        orig_GetRawInputDeviceInfoA = (GetRawInputDeviceInfoA_t)GetProcAddress(hUser32, "GetRawInputDeviceInfoA");
-    }
-
-    // Patch Main EXE and loaded DLLs
-    HMODULE hMainExe = GetModuleHandle(NULL);
-    PatchIAT(hMainExe, "user32.dll", "GetRawInputDeviceInfoW", (void*)Hooked_GetRawInputDeviceInfoW, (void**)&orig_GetRawInputDeviceInfoW);
-    PatchIAT(hMainExe, "user32.dll", "GetRawInputDeviceInfoA", (void*)Hooked_GetRawInputDeviceInfoA, (void**)&orig_GetRawInputDeviceInfoA);
-
-    // Patch all other loaded modules
-    HANDLE hProcess = GetCurrentProcess();
-    HMODULE hMods[1024];
-    DWORD cbNeeded;
-    if (EnumProcessModules(hProcess, hMods, sizeof(hMods), &cbNeeded)) {
-        for (unsigned int i = 0; i < (cbNeeded / sizeof(HMODULE)); i++) {
-            if (hMods[i] != hMainExe && hMods[i] != hMySelf) {
-                PatchIAT(hMods[i], "user32.dll", "GetRawInputDeviceInfoW", (void*)Hooked_GetRawInputDeviceInfoW, (void**)&orig_GetRawInputDeviceInfoW);
-                PatchIAT(hMods[i], "user32.dll", "GetRawInputDeviceInfoA", (void*)Hooked_GetRawInputDeviceInfoA, (void**)&orig_GetRawInputDeviceInfoA);
             }
         }
     }
@@ -188,8 +161,13 @@ void SafeInitialize() {
         return;
     }
     InitUDP();
-    InstallRawInputHooks();
-    WriteLog("[SteamAPI DLL] Hook & RawInput Spoofing initialized successfully.\n");
+    EnsureUser32Pointers();
+    PatchModuleIAT(GetModuleHandle(NULL));
+    HMODULE hFullGame = GetModuleHandleA("fullgame.dll");
+    if (hFullGame) {
+        PatchModuleIAT(hFullGame);
+    }
+    WriteLog("[SteamAPI DLL] Hook & Safe RawInput Spoofing initialized successfully.\n");
     g_Initialized = true;
     LeaveCriticalSection(&init_lock);
 }
@@ -243,6 +221,13 @@ void __cdecl Hooked_ControllerTriggerVibration(void* self, uint64_t controllerHa
 
 void* __cdecl DetourSteamInternal_FindOrCreateUserInterface(int hSteamUser, const char* pszInterfaceVersion) {
     EnsureOrigInitialized();
+    
+    // Check if fullgame.dll loaded dynamically and patch it
+    HMODULE hFullGame = GetModuleHandleA("fullgame.dll");
+    if (hFullGame) {
+        PatchModuleIAT(hFullGame);
+    }
+
     void* pInterface = NULL;
     if (orig_SteamInternal_FindOrCreateUserInterface) {
         pInterface = orig_SteamInternal_FindOrCreateUserInterface(hSteamUser, pszInterfaceVersion);
@@ -330,7 +315,7 @@ extern "C" BOOL WINAPI DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID
         case DLL_PROCESS_ATTACH:
             hMySelf = hModule;
             InitializeCriticalSection(&init_lock);
-            InstallRawInputHooks();
+            EnsureOrigInitialized();
             break;
         case DLL_PROCESS_DETACH:
             DeleteCriticalSection(&init_lock);
